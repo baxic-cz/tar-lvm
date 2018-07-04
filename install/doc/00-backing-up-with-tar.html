@@ -1,0 +1,296 @@
+<!DOCTYPE html
+     PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN"
+    "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="cs" lang="cs">
+
+
+  <head>
+
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+
+    <title>Backing up with tar</title>
+
+  </head>
+
+
+  <body>
+
+    <div id="wrapper_outter">
+
+      <div id="wrapper">
+
+        <div id="maincontainer1">
+
+          <div id="main1">
+
+            <div id="title">
+
+              <h3>System backup</h3>
+              
+            </div><!-- title -->
+
+            <div id="content">
+
+              <h4>Backing up with tar</h4>
+
+              <div id="article_wrapper" class="article">
+
+                <div class="richtext">
+
+                  <h5 class="block">
+                    <a id="introduction" name="introduction">
+                      Introduction
+                    </a>
+                  </h5>
+                  <p class="block">
+                    This article explains how to use <a href="https://www.gnu.org/software/tar">GNU tar</a> to create a <em class="italic">Linux</em> based operating system backup and how to restore it later if needed. It assumes that the filesystems to backup are the traditional <em class="italic">Linux</em> <em class="italic">ext2</em> based filesystems, i.e. of type <em class="italic">ext2</em>, <em class="italic">ext3</em> or <em class="italic">ext4</em>, or widely used <em class="italic">xfs</em> or relatively new <em class="italic">btrfs</em> filesystems. It was tested that these filesystems can be fully restored if proper arguments are given as explained later. The described steps should work for other <em class="italic">Linux</em> filesystems as well if they&#039;re able to store all standard <em class="italic">Linux</em> file types and attributes, but that wasn&#039;t confirmed at the time of this writing. However, it was successfully tested that <em class="italic">GNU tar</em> is able to backup one filesystem of the aforementioned type and restore it to another type. Later versions of <em class="italic">GNU tar</em> (e.g. version 1.27.1) support even <em class="italic">POSIX ACLs</em> and can be used to perform not just full, but incremental backups as well.
+                  </p>
+                  <h5 class="block">
+                    <a id="gnu_tar_capabilities" name="gnu_tar_capabilities">
+                      GNU tar capabilities
+                    </a>
+                  </h5>
+                  <p class="block">
+                    <em class="italic">GNU tar</em> is capable of archiving all <em class="italic">Linux</em> file types except unix domain sockets. However, the file of this type normally exists only if the process that created it is running unless the process exits abnormally. Hence, this isn&#039;t an issue. All other file types including regular files, directories, symbolic links, named pipes and character and block devices are stored. All important information about these file types is contained in the archive: filenames, permissions, owner, group, modification time, symbolic link target and major and minor device numbers. Hard links are stored and extracted properly too if they&#039;re put into the same archive. <em class="italic">GNU tar</em> can also handle sparse files efficiently, but only if it obtains the <code class="code">--sparse</code> option during the backup. Later <em class="italic">GNU tar</em> versions are able to backup and restore <em class="italic">POSIX ACLs</em> if the <code class="code">--acls</code> argument is given to <code class="code">tar</code> during both creating and restoring the archive. However, the special <code class="code">lost+found</code> directory in the root directory of an <em class="italic">ext2</em> based filesystem is treated as a usual directory and should be therefore excluded from the backup by using the <code class="code">--exclude</code> option.
+                  </p>
+                  <p class="block">
+                    Furthermore, <em class="italic">GNU tar</em> can create incremental backups if it is called with the <code class="code">-g</code> switch. It uses <em class="italic">ctime</em> (time of last modification of file status information) to determine whether the file or its status has changed. This is a second best choice after using hashes because if the file contents changes, the <em class="italic">mtime</em> (modification time) and therefore also the <em class="italic">ctime</em> change. However, if the file is only accessed and <em class="italic">atime</em> (access time) is modified, <em class="italic">ctime</em> remains unaltered. If only the file status changes (permissions, owner, group etc.), <em class="italic">ctime</em> is also updated. The only drawback of this method is that it is necessary to maintain correct system time. It is not possible to modify <em class="italic">ctime</em> arbitrarily by using some command, but if the system time changes, later modifications may occur as older ones and the incremental backup will unfortunately not contain such files. You should also take into account that the <code class="code">-g</code> switch requires an argument denoting the path to so called snapshot archive. The snapshot archive contains additional information that is necessary to determine whether a file should be included into the incremental archive or not. More precisely, the snapshot archive contains the list of all files and their <em class="italic">ctimes</em>.
+                  </p>
+                  <h5 class="block">
+                    <a id="creating_full_backup_archives" name="creating_full_backup_archives">
+                      Creating full backup archives
+                    </a>
+                  </h5>
+                  <p class="block">
+                    If you want to create consistent operating system backup, you need to backup a snapshot of all partitions where the system is installed. This can be accomplished either by shutting down the system and backing it up (e.g. from a live CD) or by stopping all processes that are writing to the filesystems to backup, remounting them read-only and then performing a consistent backup.
+                  </p>
+                  <p class="block">
+                    The latter approach doesn&#039;t require to stop the system. Moreover, it can be further improved by using a technology that is able to create filesystem snapshots at a particular time. <em class="italic">LVM</em> (Logical Volume Management) can be used for this purpose if you have enough free space in the volume group containing logical volumes with data. The writing processes can be then stopped and the filesystems remounted read-only just for the moment of creating snapshots. The system can continue running after that and the backup can be performed on the snapshots instead of on the running system.
+                  </p>
+                  <p class="block">
+                    Let&#039;s now look at the concrete commands that can be used to backup an operating system snapshot. Let&#039;s remount all filesystems read-only at first.
+                  </p>
+                  <div class="block">
+                    <div class="commands">
+                      <ul>
+                        <li>mount -o remount,ro /boot</li>
+                        <li>mount -o remount,ro /<br />...</li>
+                        <li>mount -o remount,ro /home</li>
+                      </ul>
+                    </div>
+                  </div>
+                  <p class="block">
+                    The backup archives of the snapshot can be then created as follows:
+                  </p>
+                  <div class="block">
+                    <div class="commands">
+                      <ul>
+                        <li>tar -cvvzf boot.0.tgz -g boot.0.snar -C /boot --one-file-system --sparse --acls --exclude ./lost+found .</li>
+                        <li>tar -cvvzf rootfs.0.tgz -g rootfs.0.snar -C / --one-file-system --sparse --acls --exclude ./lost+found .<br />...</li>
+                        <li>tar -cvvzf home.0.tgz -g home.0.snar -C /home --one-file-system --sparse --acls --exclude ./lost+found .</li>
+                      </ul>
+                    </div>
+                  </div>
+                  <p class="block">
+                    The aforementioned <code class="code">--sparse</code> and <code class="code">--acls</code> options ensure that sparse files are stored efficiently as sparse and that <em class="italic">POSIX ACLs</em> are included into the archives as well. The <code class="code">--one-file-system</code> option instructs <code class="code">tar</code> not to archive files from other filesystems. And the <code class="code">--exclude</code> option is self-explanatory. Bare in mind that the special <code class="code">lost+found</code> directory of an <em class="italic">ext2</em> based filesystem should be always excluded from the backup because it is restored as a usual directory. The <code class="code">-g</code> option is not necessary. However, you must pass it to <code class="code">tar</code> in order to create subsequent incremental backup(s) later. The <code class="code">-g</code> switch defines the filename of so called snapshot archive with additional metadata to identify files whose attributes or contents changed since the preceding backup.
+                  </p>
+                  <h5 class="block">
+                    <a id="creating_incremental_backup_archives" name="creating_incremental_backup_archives">
+                      Creating incremental backup archives
+                    </a>
+                  </h5>
+                  <p class="block">
+                    Creating an incremental backup is analogous to <a href="#creating_full_backup_archives">creating the foregoing full backup</a>. An operating system snapshot should be made in the same way as in the case of the full backup, e.g. by invoking:
+                  </p>
+                  <div class="block">
+                    <div class="commands">
+                      <ul>
+                        <li>mount -o remount,ro /boot</li>
+                        <li>mount -o remount,ro /<br />...</li>
+                        <li>mount -o remount,ro /home</li>
+                      </ul>
+                    </div>
+                  </div>
+                  <p class="block">
+                    Archiving the filesystems is also similar. The snapshot archive referenced by the <code class="code">-g</code> switch is used to identify and backup modified files. It is also updated so that another incremental backup based on the incremental backup being created can be performed later. Hence, let&#039;s copy all snapshot archives at first to keep them for each incremental backup level.
+                  </p>
+                  <div class="block">
+                    <div class="commands">
+                      <ul>
+                        <li>cp boot.0.snar boot.1.snar</li>
+                        <li>cp rootfs.0.snar rootfs.1.snar<br />...</li>
+                        <li>cp home.0.snar home.1.snar</li>
+                      </ul>
+                    </div>
+                  </div>
+                  <p class="block">
+                    The backup can be done after that in the same way as the full backup. Just the archive names are adjusted to refer to the new backup level.
+                  </p>
+                  <div class="block">
+                    <div class="commands">
+                      <ul>
+                        <li>tar -cvvzf boot.1.tgz -g boot.1.snar -C /boot --one-file-system --sparse --acls --exclude ./lost+found .</li>
+                        <li>tar -cvvzf rootfs.1.tgz -g rootfs.1.snar -C / --one-file-system --sparse --acls --exclude ./lost+found .<br />...</li>
+                        <li>tar -cvvzf home.1.tgz -g home.1.snar -C /home --one-file-system --sparse --acls --exclude ./lost+found .</li>
+                      </ul>
+                    </div>
+                  </div>
+                  <p class="block">
+                    Subsequent incremental backup archives are generated by the same commands. Just the backup level in the archive names must be adjusted again.
+                  </p>
+                  <h5 class="block">
+                    <a id="restoring_the_backups" name="restoring_the_backups">
+                      Restoring the backups
+                    </a>
+                  </h5>
+                  <p class="block">
+                    Let&#039;s assume that you have your disk prepared for data extraction, i.e. that it contains valid partition table and that its partitions are formatted to <em class="italic">ext2</em> based or other supported <em class="italic">Linux</em> filesystems, ideally the same as in the original system because you don&#039;t have to modify configuration of the target system in that case - first of all the file <span class="file">/etc/fstab</span>. The swap partition should be formatted as swap space by <code class="code">mkswap</code>.
+                  </p>
+                  <p class="block">
+                    Then mount each empty filesystem and extract the archives to its root folder. Firstly the full backup archive and then all incremental backups in the order in which they were created. The following example assumes that the boot filesystem is located at the first primary partition <span class="file">/dev/sda1</span> and that other filesystems exist on top of <em class="italic">LVM</em> group <span class="file">mg</span>.
+                  </p>
+                  <div class="block">
+                    <div class="commands">
+                      <ul>
+                        <li>mount -o acl /dev/mg/rootfs /mnt/restore</li>
+                        <li>tar -xvvzf rootfs.0.tgz -g /dev/null -C /mnt/restore/ --numeric-owner --acls</li>
+                        <li>tar -xvvzf rootfs.1.tgz -g /dev/null -C /mnt/restore/ --numeric-owner --acls<br />...</li>
+                        <li>mount -o acl /dev/sda1 /mnt/restore/boot</li>
+                        <li>tar -xvvzf boot.0.tgz -g /dev/null -C /mnt/restore/boot --numeric-owner --acls</li>
+                        <li>tar -xvvzf boot.1.tgz -g /dev/null -C /mnt/restore/boot --numeric-owner --acls<br />...<br />...</li>
+                        <li>mount -o acl /dev/mg/home /mnt/restore/home</li>
+                        <li>tar -xvvzf home.0.tgz -g /dev/null -C /mnt/restore/home --numeric-owner --acls</li>
+                        <li>tar -xvvzf home.1.tgz -g /dev/null -C /mnt/restore/home --numeric-owner --acls<br />...</li>
+                      </ul>
+                    </div>
+                  </div>
+                  <p class="block">
+                    The <code class="code">--numeric-owner</code> argument is essential not to restore file owner and group names from the archive, but just their <em class="italic">UIDs</em> and <em class="italic">GIDs</em>. This becomes important when extracting using different operating system than the final one because <code class="code">tar</code> doesn&#039;t change file <em class="italic">UIDs</em> and <em class="italic">GIDs</em> depending on matching usernames on the running system. The <code class="code">--acls</code> option can be left out if ACLs aren&#039;t used on the restored filesystems. It doesn&#039;t conflict with the <code class="code">--numeric-owner</code> option if it is used just during restoration.
+                  </p>
+                  <p class="block">
+                    The disk now contains all data, but the system is not able to boot yet.
+                  </p>
+                  <h5 class="block">
+                    <a id="installing_the_boot_loader" name="installing_the_boot_loader">
+                      Installing the boot loader
+                    </a>
+                  </h5>
+                  <p class="block">
+                    This step varies depending on the used <em class="italic">Linux</em> distribution, boot loader and disk layout. The following description applies to <a href="http://www.debian.org">Debian</a> which is using the <em class="italic">GRUB</em> boot loader and has its filesystems on top of <em class="italic">LVM</em> with the only exception of the boot directory that lays on the first primary partition <span class="file">/dev/sda1</span>. However, it can be customized for other cases as well by using other commands, boot loader (e.g. <em class="italic">lilo</em>) or devices.
+                  </p>
+                  <p class="block">
+                    The basic idea behind the procedure is simple. Boot from a live CD, mount all filesystems into the target directory tree and run <code class="code">chroot</code> to see just this tree. Then update filesystem <em class="italic">UUIDs</em> in some configuration files (or possibly other references to the filesystems if you changed their number, types or names), update the initial ramdisks for all kernel versions and configure and install the boot loader itself.
+                  </p>
+                  <p class="block">
+                    The filesystems were already mounted to <span class="file">/mnt/restore</span> during archive extraction. 
+                    However, some filesystems generated by the running kernel or daemons need to be mounted yet.
+                  </p>
+                  <div class="block">
+                    <div class="commands">
+                      <ul>
+                        <li>mount -t proc proc /mnt/restore/proc</li>
+                        <li>mount -t sysfs sysfs /mnt/restore/sys</li>
+                        <li>mount -t udev devtmpfs /mnt/restore/dev</li>
+                      </ul>
+                    </div>
+                  </div>
+                  <p class="block">
+                    The root directory of the file/directory tree can be changed after that.
+                  </p>
+                  <div class="block">
+                    <div class="commands">
+                      <ul>
+                        <li>chroot /mnt/restore</li>
+                      </ul>
+                    </div>
+                  </div>
+                  <p class="block">
+                    You shouldn&#039;t forget to check <span class="file">/etc/fstab</span> for the filesystem references if they are correct. And if you changed the filesystem types, you must update them as well. This example assumes that all filesystems were recreated in the same way as in the original system and thus just the <em class="italic">UUIDs</em> had to be updated, e.g.
+                  </p>
+                  <div class="block">
+                    <div class="contents">
+                      <ul>
+                        <li>UUID=... /boot ext3 defaults,errors=remount-ro,nodev,nosuid,noexec 0 2</li>
+                      </ul>
+                    </div>
+                  </div>
+                  <p class="block">
+                    Filesystem <em class="italic">UUID</em> can be found out by using the <code class="code">blkid</code> command, e.g.:
+                  </p>
+                  <div class="block">
+                    <div class="commands">
+                      <ul>
+                        <li>blkid /dev/sda1</li>
+                      </ul>
+                    </div>
+                  </div>
+                  <p class="block">
+                    It&#039;s recommended to check if the <em class="italic">initrd</em> configuration doesn&#039;t refer to incorrect filesystem as well. It needs to refer to the swap device for the purpose of resuming from hibernation. This can be done in the file <span class="file">/etc/initramfs-tools/conf.d/resume</span> in <em class="italic">Debian</em>:
+                  </p>
+                  <div class="block">
+                    <div class="contents">
+                      <ul>
+                        <li>RESUME=/dev/mg/swap</li>
+                      </ul>
+                    </div>
+                  </div>
+                  <p class="block">
+                    Finally, it should be sufficient to update <em class="italic">initrd</em> and <em class="italic">GRUB</em>.
+                  </p>
+                  <div class="block">
+                    <div class="commands">
+                      <ul>
+                        <li>update-initramfs -k all -u</li>
+                        <li>grub-install</li>
+                        <li>update-grub</li>
+                      </ul>
+                    </div>
+                  </div>
+                  <p class="block">
+                    And try to reboot.
+                  </p>
+                  <h5 class="block">
+                    <a id="summary" name="summary">
+                      Summary
+                    </a>
+                  </h5>
+                  <p class="block">
+                    It&#039;s possible to use <em class="italic">GNU tar</em> to backup and restore whole <em class="italic">Linux</em> operating system. The backup can be done while the system is running, but you must ensure that you&#039;re backing up a consistent snapshot of the operating system.
+                  </p>
+                  <p class="block">
+                    The described method should work for any <em class="italic">Linux</em> distribution because the <em class="italic">GNU</em> implementation of the standard <em class="italic">tar</em> command should be part of it. Even if it is not, you could backup from a live CD distribution from time to time. <em class="italic">GNU tar</em> should be able to store all permanent <em class="italic">Linux</em> file types and important attributes and the procedure should thus work for most <em class="italic">Linux</em> filesystems. This method was fully tested only on <em class="italic">ext2</em> based filesystems and partially on <em class="italic">xfs</em> and <em class="italic">btrfs</em> and it was used to restore several different installations of <em class="italic">Debian</em> <em class="italic">squeeze</em>, <em class="italic">wheezy</em> and <em class="italic">jessie</em> and also of <em class="italic">CentOS 7</em>. No problem occurred after the whole system was restored, all permissions and all important attributes were maintained as explained above.
+                  </p>
+
+                </div>
+
+              </div>
+
+              <p class="nomargin nopadding">&nbsp;</p>
+
+              <div class="cleaner">&nbsp;</div>
+            </div><!-- content -->
+
+          </div><!-- main1 -->
+
+        </div><!-- maincontainer1 -->
+
+        <div id="footer">
+
+          <div class="footer_middle">
+            <p class="block">
+              The contents of this page is distributed under the
+              <a href="http://www.gnu.org/licenses/fdl.html">GNU FDL</a>
+              license.
+            </p>
+          </div>
+
+        </div><!-- footer -->
+
+      </div><!-- wrapper -->
+
+    </div><!-- wrapper_outter -->
+
+  </body>
+
+
+</html>

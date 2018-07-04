@@ -1,0 +1,287 @@
+<!DOCTYPE html
+     PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN"
+    "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="cs" lang="cs">
+
+
+  <head>
+
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+
+    <title>Triggering the backup</title>
+
+  </head>
+
+
+  <body>
+
+    <div id="wrapper_outter">
+
+      <div id="wrapper">
+
+        <div id="maincontainer1">
+
+          <div id="main1">
+
+            <div id="title">
+
+              <h3>Tar-LVM</h3>
+              
+            </div><!-- title -->
+
+            <div id="content">
+
+              <h4>Triggering the backup</h4>
+
+              <div id="article_wrapper" class="article">
+
+                <div class="richtext">
+
+                  <h5 class="block">
+                    <a id="manual_backup" name="manual_backup">
+                      Manual backup
+                    </a>
+                  </h5>
+                  <p class="block">
+                    Whether you have configured <em class="italic">Tar-LVM</em> just basically for manual backup or more thoroughly for automated backup, <em class="important">you can always run the backup manually from the command line</em>. Both <strong class="bold"><em class="italic">ssd-backup</em></strong> and <strong class="bold"><em class="italic">tar-lvm</em></strong> scripts are installed and must be configured irrespective of the model used.
+                  </p>
+                  <p class="block">
+                    If all your filesystems that must stay read-write during normal system operation are using <em class="italic">LVM</em> volumes and if the <code class="code">tar-lvm</code> script is configured to create and backup their <em class="italic">LVM</em> snapshots, full manual backup can be invoked by using the following command sequence.
+                  </p>
+                  <div class="block">
+                    <div class="commands">
+                      <ul>
+                        <li>ssd-backup -u -v stop</li>
+                        <li>tar-lvm -v pre</li>
+                        <li>ssd-backup -u -v start</li>
+                        <li>tar-lvm -v run 0 /path/to/backup/dir</li>
+                        <li>tar-lvm -v post</li>
+                      </ul>
+                    </div>
+                  </div>
+                  <p class="block">
+                    The downtime of all services to stop is really short, because it covers only the period that is necessary for creating <em class="italic">LVM</em> snapshots. After the snapshots are created, the system can operate normally because the contents of the snaphots is backed up.
+                  </p>
+                  <p class="block">
+                    If the read-write filesystems are not on <em class="italic">LVM</em>, their backup can be performed as well. The only difference is the duration of the downtime period that must cover whole backup process in order to create consistent backup of whole operating system.
+                  </p>
+                  <div class="block">
+                    <div class="commands">
+                      <ul>
+                        <li>ssd-backup -u -v stop</li>
+                        <li>tar-lvm -v pre</li>
+                        <li>tar-lvm -v run 0 /path/to/backup/dir</li>
+                        <li>tar-lvm -v post</li>
+                        <li>ssd-backup -u -v start</li>
+                      </ul>
+                    </div>
+                  </div>
+                  <p class="block">
+                    Consecutive incremental backups are obtained in the same way, just the <code class="code">level</code> argument of the <code class="code">tar-lvm</code> command in the <code class="code">run</code> mode must be increased. E.g. a level 1 incremental backup can be obtained as follows.
+                  </p>
+                  <div class="block">
+                    <div class="commands">
+                      <ul>
+                        <li>...</li>
+                        <li>tar-lvm -v run 1 /path/to/backup/dir</li>
+                        <li>...</li>
+                      </ul>
+                    </div>
+                  </div>
+                  <h5 class="block">
+                    <a id="automated_backup" name="automated_backup">
+                      Automated backup
+                    </a>
+                  </h5>
+                  <h6 class="block">
+                    <a id="centralized_triggering_model" name="centralized_triggering_model">
+                      Centralized triggering model
+                    </a>
+                  </h6>
+                  <p class="block">
+                    A compulsory prerequisity for the <strong class="bold">centralized</strong> triggering model is to have the <strong class="bold"><em class="italic">tar-lvm-all</em></strong> script installed and configured at the host triggering and managing the backups. Its usage is then simple, just don&#039;t forget that <em class="italic">SSH</em> public key authentication must be set up as described earlier.
+                  </p>
+                  <p class="block">
+                    Let&#039;s edit the configuration of the <em class="italic">Cron</em> scheduler at the <strong class="bold">triggering host</strong>.
+                  </p>
+                  <div class="block">
+                    <div class="commands">
+                      <ul>
+                        <li>crontab -e</li>
+                      </ul>
+                    </div>
+                  </div>
+                  <p class="block">
+                    It could look as follows to run the backups at midnight. Full backup is done on Sunday and the incremental ones on all other week days.
+                  </p>
+                  <div class="block">
+                    <div class="contents">
+                      <ul>
+                        <li>SHELL=/bin/bash</li>
+                        <li>MAILTO=backup@domain.org</li>
+                        <li>PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin</li>
+                        <li></li>
+                        <li>...</li>
+                        <li>0 0 * * * tar-lvm-all all &quot;$(date &#039;+%w&#039;)&quot;</li>
+                      </ul>
+                    </div>
+                  </div>
+                  <p class="block">
+                    <em class="important">The backup results can be checked automatically as well</em> and mailed by <em class="italic">Cron</em>. This must be configured at the <strong class="bold">triggering host</strong> again, i.e. at the host where <code class="code">tar-lvm-all</code> runs.
+                  </p>
+                  <div class="block">
+                    <div class="commands">
+                      <ul>
+                        <li>crontab -e</li>
+                      </ul>
+                    </div>
+                  </div>
+                  <div class="block">
+                    <div class="contents">
+                      <ul>
+                        <li>SHELL=/bin/bash</li>
+                        <li>MAILTO=backup@domain.org</li>
+                        <li>PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin</li>
+                        <li></li>
+                        <li>...</li>
+                        <li>0 6 * * * tar-lvm-all check &quot;$(date &#039;+%w&#039;)&quot;</li>
+                      </ul>
+                    </div>
+                  </div>
+                  <h6 class="block">
+                    <a id="distributed_triggering_model" name="distributed_triggering_model">
+                      Distributed triggering model
+                    </a>
+                  </h6>
+                  <p class="block">
+                    As it was already mentioned, the <strong class="bold">distributed</strong> triggering model doesn&#039;t require to have the <code class="code">tar-lvm-all</code> script installed or configured, <strong class="bold">tar-lvm-one</strong> is sufficient. This also means that the direct access method of the backup storage shouldn&#039;t be used and that the backup storage should be always accessed remotely using the <em class="italic">SSHFS</em> filesystem. The reason is that this method allows concurrent access to the backup device from more hosts.
+                  </p>
+                  <p class="block">
+                    If you want to run the backup of certain host at midnight with full backup on Sunday and incremental backups on all other week days, simply configure <em class="italic">Cron</em> as follows at the <strong class="bold">backup host</strong>, i.e. at the host being backed up.
+                  </p>
+                  <div class="block">
+                    <div class="commands">
+                      <ul>
+                        <li>crontab -e</li>
+                      </ul>
+                    </div>
+                  </div>
+                  <div class="block">
+                    <div class="contents">
+                      <ul>
+                        <li>SHELL=/bin/bash</li>
+                        <li>MAILTO=backup@domain.org</li>
+                        <li>PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin</li>
+                        <li></li>
+                        <li>...</li>
+                        <li>0 0 * * * tar-lvm-one all &quot;$(date &#039;+%w&#039;)&quot; &amp;&amp; echo &#039;tar-lvm-one result =&gt; ok&#039; || echo &#039;tar-lvm-one result =&gt; failure&#039;</li>
+                      </ul>
+                    </div>
+                  </div>
+                  <p class="block">
+                    <em class="important">The backup results can be checked automatically again</em> and mailed by <em class="italic">Cron</em> if the <code class="code">tar-lvm-one</code> script in the <code class="code">check</code> mode produces some error output. This must be configured at the <strong class="bold">backup host</strong> again.
+                  </p>
+                  <div class="block">
+                    <div class="commands">
+                      <ul>
+                        <li>crontab -e</li>
+                      </ul>
+                    </div>
+                  </div>
+                  <div class="block">
+                    <div class="contents">
+                      <ul>
+                        <li>SHELL=/bin/bash</li>
+                        <li>MAILTO=backup@domain.org</li>
+                        <li>PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin</li>
+                        <li></li>
+                        <li>...</li>
+                        <li>0 6 * * * tar-lvm-one check &quot;$(date &#039;+%w&#039;)&quot;</li>
+                      </ul>
+                    </div>
+                  </div>
+                  <h6 class="block">
+                    <a id="rotating_the_backups_and_logs" name="rotating_the_backups_and_logs">
+                      Rotating the backups and logs
+                    </a>
+                  </h6>
+                  <p class="block">
+                    It&#039;s wise not to use the <code class="code">-f</code> argument to delete existing archives and logs of the same or higher backup level, but save the target backup directory at the <strong class="bold">backup storage</strong> before each new full backup is created.
+                  </p>
+                  <p class="block">
+                    The simplest solution could be configured in <em class="italic">Cron</em> at the backup storage. If the full backup is created on Sunday and incremental backups on another week days, let&#039;s save just the backups for the last week and delete everything else.
+                  </p>
+                  <div class="block">
+                    <div class="commands">
+                      <ul>
+                        <li>crontab -e</li>
+                      </ul>
+                    </div>
+                  </div>
+                  <div class="block">
+                    <div class="contents">
+                      <ul>
+                        <li>SHELL=/bin/bash</li>
+                        <li>MAILTO=backup@domain.org</li>
+                        <li>PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin</li>
+                        <li></li>
+                        <li>...</li>
+                        <li>50 23 * * 6 cd /path/to/backup/storage &amp;&amp; rm -fr tar-lvm.old &amp;&amp; mv tar-lvm tar-lvm.old</li>
+                      </ul>
+                    </div>
+                  </div>
+                  <p class="block">
+                    There are many ways how to achieve backup rotation depending on your needs. Another example storing all backups for the whole year could be configured using <em class="italic">Cron</em> again at the <strong class="bold">backup storage</strong>.
+                  </p>
+                  <div class="block">
+                    <div class="commands">
+                      <ul>
+                        <li>crontab -e</li>
+                      </ul>
+                    </div>
+                  </div>
+                  <div class="block">
+                    <div class="contents">
+                      <ul>
+                        <li>SHELL=/bin/bash</li>
+                        <li>MAILTO=backup@domain.org</li>
+                        <li>PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin p-</li>
+                        <li>...</li>
+                        <li>50 23 * * 6 cd /path/to/backup/storage &amp;&amp; rm -fr &quot;tar-lvm.$(date &#039;+%W&#039;)&quot; &amp;&amp; mv tar-lvm &quot;tar-lvm.$(date &#039;+%W&#039;)&quot;</li>
+                      </ul>
+                    </div>
+                  </div>
+
+                </div>
+
+              </div>
+
+              <p class="nomargin nopadding">&nbsp;</p>
+
+              <div class="cleaner">&nbsp;</div>
+            </div><!-- content -->
+
+          </div><!-- main1 -->
+
+        </div><!-- maincontainer1 -->
+
+        <div id="footer">
+
+          <div class="footer_middle">
+            <p class="block">
+              The contents of this page is distributed under the
+              <a href="http://www.gnu.org/licenses/fdl.html">GNU FDL</a>
+              license.
+            </p>
+          </div>
+
+        </div><!-- footer -->
+
+      </div><!-- wrapper -->
+
+    </div><!-- wrapper_outter -->
+
+  </body>
+
+
+</html>

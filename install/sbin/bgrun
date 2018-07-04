@@ -1,0 +1,104 @@
+#!/bin/bash
+
+###############################################################################
+#
+# script: bgrun
+# author: Lukas Baxa alias Baxic <baxic-cs@seznam.cz>
+#
+# This script is free software; you can redistribute it and/or modify it
+# under the terms of the GNU General Public License as published by the
+# Free Software Foundation; either version 3, or (at your option) any later
+# version.
+#
+###############################################################################
+
+
+PROGNAME='bgrun'
+PNSPACES='     '
+
+# set versions
+SCRIPT_VERSION='00.20'
+SUITE_VERSION='00.80'
+
+# check_tools() tool1 ... toolN
+#   check if all the external tools tool1 ... toolN are available on the system
+# return: exit - some of the tools are missing
+#         0 - ok
+check_tools() {
+
+    local fail fst
+    local tool
+    
+    if ! which which >/dev/null 2>&1; then
+        echo "$PROGNAME: cannot find the 'which' command that is necessary" >&2
+        exit 1
+    fi
+
+    fail=1
+    fst=0
+    for tool in "$@"; do
+        if ! which "$tool" >/dev/null 2>&1; then
+            if [[ "$fst" = 0 ]]; then
+                echo "$PROGNAME: cannot find the following tools/commands that are necessary" >&2
+                fst=1
+            fi
+            echo "  '$tool'" >&2
+            fail=0
+        fi
+    done
+
+    [[ "$fail" = 0 ]] && exit 1
+    return 0
+
+}
+
+
+# usage() [exit_code]
+#   print the usage info and exit with given exit code (default 0)
+# return: exit
+usage() {
+
+    local ec="${1:-0}"
+    if [[ "$ec" != 0 ]]; then
+        exec >&2
+    fi
+
+    echo "$PROGNAME - run process on background and send its output by mail"
+    echo
+    echo "    ($PROGNAME version: $SCRIPT_VERSION, tar-lvm suite version: $SUITE_VERSION)"    
+    echo
+    echo "usage: $PROGNAME -h"
+    echo "       $PROGNAME [ [[FROM-ADDR] smtp[-tls|s]://[USER:PASS@]SERVER[:PORT]] \\"
+    echo "       $PNSPACES TO-ADDR-1 ... ] -- COMMAND [ARGUMENTS]"
+    echo
+    
+    exit "$ec"
+
+}
+
+
+###### MAIN ###################################################################
+
+### check if all the external tools are available on the system
+check_tools cmdsend
+
+
+# parse and check arguments
+[[ $# -lt 1 ]] && usage 1
+[[ $# -eq 1 && "$1" = '-h' ]] && usage
+
+
+# run cmdsend on background, cmdsend runs the specified command,
+# redirects its output to a file and mails it at the end to the specified
+# email addresses
+cmdsend "$@" &
+
+
+# wait so that cmdsend can report errors about its incorrect usage
+# and all ssh commands are finished (e.g. by tar-lvm-one when mounting
+# the sshfs filesystems and ssh-agent is in use)
+sleep 10
+
+
+# always clean exit, we cannot know the exit status of the running command yet
+exit 0

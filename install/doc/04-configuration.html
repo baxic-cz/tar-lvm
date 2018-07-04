@@ -1,0 +1,548 @@
+<!DOCTYPE html
+     PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN"
+    "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="cs" lang="cs">
+
+
+  <head>
+
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+
+    <title>Configuration</title>
+
+  </head>
+
+
+  <body>
+
+    <div id="wrapper_outter">
+
+      <div id="wrapper">
+
+        <div id="maincontainer1">
+
+          <div id="main1">
+
+            <div id="title">
+
+              <h3>Tar-LVM</h3>
+              
+            </div><!-- title -->
+
+            <div id="content">
+
+              <h4>Configuration</h4>
+
+              <div id="article_wrapper" class="article">
+
+                <div class="richtext">
+
+                  <h5 class="block">
+                    <a id="basic_configuration_on_any_host_to_backup" name="basic_configuration_on_any_host_to_backup">
+                      Basic configuration on any host to backup
+                    </a>
+                  </h5>
+                  <h6 class="block">
+                    <a id="stopping_and_starting_processes_ssd_backup" name="stopping_and_starting_processes_ssd_backup">
+                      Stopping and starting processes: ssd-backup
+                    </a>
+                  </h6>
+                  <p class="block">
+                    If you want to create a snapshot of all backed up filesystems together and not of each filesystem separately, you need to stop all processes that write to the backed up locations, remount filesystems temporarily read-only and then create snapshots. After the snapshots are created, the filesystems can be remounted back read-write and the processes can be started again. This task of stopping and starting daemons or processes is performed by the <strong class="bold"><em class="italic">ssd-backup</em></strong> script that is part of the <em class="italic">Tar-LVM</em> suite.
+                  </p>
+                  <p class="block">
+                    Let&#039;s now look at the <em class="italic">ssd-backup</em> configuration. This script is configured by default using the file <span class="file">/usr/local/etc/ssd-backup.conf</span>.
+                  </p>
+                  <div class="block">
+                    <div class="contents">
+                      <ul>
+                        <li>### disable sysv (System V) or systemd (Systemd) init scripts support,</li>
+                        <li>### just comment for the default behaviour, i.e. sysv/systemd support</li>
+                        <li># format: nosysv (&quot;true&quot;|&quot;false&quot;)</li>
+                        <li># format: nosystemd (&quot;true&quot;|&quot;false&quot;)</li>
+                        <li></li>
+                        <li>#nosysv &quot;true&quot;</li>
+                        <li>#nosystemd &quot;true&quot;</li>
+                        <li></li>
+                        <li></li>
+                        <li>### sysv or systemd services to stop or start depending on the mode</li>
+                        <li># format: stopstart sysv|systemd &lt;service&gt; [[pidfile=...][,][psname=...]]</li>
+                        <li></li>
+                        <li>stopstart systemd sssd.service</li>
+                        <li>stopstart systemd cron.service</li>
+                        <li>stopstart systemd postfix.service</li>
+                        <li>stopstart systemd slapd.service</li>
+                        <li></li>
+                        <li>stopstart systemd denyhosts.service</li>
+                        <li>stopstart sysv rsyslog</li>
+                        <li></li>
+                        <li>stopstart systemd dbus.service</li>
+                        <li></li>
+                        <li></li>
+                        <li>### extended regular expressions specifying the names of processes</li>
+                        <li>### to kill in the stop mode (usually not services)</li>
+                        <li># format: kill &lt;regexp&gt;</li>
+                        <li></li>
+                        <li>#kill &quot;^console-kit-dae&quot;</li>
+                        <li></li>
+                        <li></li>
+                        <li>### real user names whose processes shouldn&#039;t be killed (should survive)</li>
+                        <li>### when the -u option is used, i.e. when all non-root user processes</li>
+                        <li>### should be killed (root is always included and doesn&#039;t have</li>
+                        <li>### to be listed)</li>
+                        <li># format: survruser &lt;user&gt;</li>
+                        <li></li>
+                        <li>survruser message+</li>
+                        <li>survruser ntp</li>
+                        <li></li>
+                        <li></li>
+                        <li>### commands to run at the end of the stop mode</li>
+                        <li># format: stopcomm &lt;command&gt; &lt;arg1&gt; ... &lt;argN&gt;</li>
+                        <li></li>
+                        <li>#stopcomm echo &quot;SSD stopped...&quot;</li>
+                        <li></li>
+                        <li></li>
+                        <li>### commands to run at the beginning of the start mode</li>
+                        <li># format: startcomm &lt;command&gt; &lt;arg1&gt; ... &lt;argN&gt;</li>
+                        <li></li>
+                        <li>#startcomm echo &quot;SSD starting...&quot;</li>
+                      </ul>
+                    </div>
+                  </div>
+                  <p class="block">
+                    Supported directives are concisely described directly in the configuration file.
+                  </p>
+                  <p class="block">
+                    The <code class="code">nosysv</code> or <code class="code">nosystemd</code> directives can disable the <em class="italic">System V</em> or <em class="italic">Systemd</em> support and can thus allow usage of this script even if no <code class="code">service</code> or <code class="code">systemctl</code> binary is found.
+                  </p>
+                  <p class="block">
+                    The <code class="code">stopstart</code> directives define all services to be stopped in the <code class="code">ssd-backup</code> <code class="code">stop</code> mode or started in its <code class="code">start</code> mode. The services are stopped in the specified order if they&#039;re running and started in the reverse order depending on their initial status. They also allow to specify an optional PID file and/or process name to identify running services if the operating system itself doesn&#039;t provide this information for certain service.
+                  </p>
+                  <p class="block">
+                    The <code class="code">kill</code> directive allows to kill certain processes based on their names. And the <code class="code">survruser</code> entries allow to specify all real usernames whose processes shouldn&#039;t be killed if the <code class="code">-u</code> argument is used. This argument instructs <code class="code">ssd-backup</code> to kill all user processes, i.e. all non-root processes that are not excluded by <code class="code">survruser</code>.
+                  </p>
+                  <p class="block">
+                    The <code class="code">stopcomm</code> and <code class="code">startcomm</code> directives can be used to execute arbitrary commands at the end of the stop mode or at the beginning of the start mode. They can be therefore used for any non-standard operation, e.g. remounting filesystems read-only or read-write, cleanup of some locations, sending a message to users or anything else that&#039;s scriptable.
+                  </p>
+                  <p class="block">
+                    See the <code class="code">ssd-status</code> help for more information and complete list of its arguments.
+                  </p>
+                  <div class="block">
+                    <div class="commands">
+                      <ul>
+                        <li>ssd-status -h</li>
+                      </ul>
+                    </div>
+                  </div>
+                  <p class="block">
+                    It&#039;s wise to confirm that <code class="code">ssd-backup</code> is configured properly before continuing. Simply by invoking a command sequence that&#039;s similar to the following one. But be prepared for short downtime of your services.
+                  </p>
+                  <div class="block">
+                    <div class="commands">
+                      <ul>
+                        <li>ssd-backup -u -v stop</li>
+                        <li>mount -o remount,ro /var</li>
+                        <li>mount -o remount,ro /</li>
+                        <li>...</li>
+                        <li>mount -o remount,rw /</li>
+                        <li>mount -o remount,rw /var</li>
+                        <li>ssd-backup -u -v start</li>
+                      </ul>
+                    </div>
+                  </div>
+                  <p class="block">
+                    All the <code class="code">ssd-backup</code> and <code class="code">mount</code> commands should succeed, of course, if the configuration is correct. If you need to identify the processes that are using files on certain filesystem, try the <code class="code">lsof</code> or <code class="code">fuser</code> commands.
+                  </p>
+                  <h6 class="block">
+                    <a id="creating_and_removing_snapshots_backing_up_tar_lvm" name="creating_and_removing_snapshots_backing_up_tar_lvm">
+                      Creating and removing snapshots, backing up: tar-lvm
+                    </a>
+                  </h6>
+                  <p class="block">
+                    The snapshot of the writable filesystems backed up from inside of a running operating system can be created by remounting the filesystems read-only, creating <em class="italic">LVM</em> snapshots and remounting the filesystems back to their original state, mostly often back read-write. Or by remounting the writable filesystems read-only during the whole backup process. However, the downtime of your services is much longer in the latter case.
+                  </p>
+                  <p class="block">
+                    All these operations are performed by the <strong class="bold"><em class="italic">tar-lvm</em></strong> script. Its <code class="code">pre</code> mode remounts the filesystems read-only, creates <em class="italic">LVM</em> snapshots are remounts <em class="italic">LVM</em> filesystems back read-write. Its <code class="code">run</code> mode creates the <code class="code">tar</code> backups and the <code class="code">post</code> mode remounts the <em class="italic">non-LVM</em> filesystems back to their initial state.
+                  </p>
+                  <p class="block">
+                    The <code class="code">tar-lvm</code> script is configured in the file <span class="file">/usr/local/etc/tar-lvm/tar-lvm.conf</span> which has the following syntax.
+                  </p>
+                  <div class="block">
+                    <div class="contents">
+                      <ul>
+                        <li>### suffix of the LVM snapshot names appended to the name of the origin</li>
+                        <li># format: lvsnapsuffix &lt;suffix&gt;</li>
+                        <li></li>
+                        <li>lvsnapsuffix &quot;.tar-lvm&quot;</li>
+                        <li></li>
+                        <li></li>
+                        <li>### disables ACLs support if set (necessary for older GNU/tar versions),</li>
+                        <li>### just comment for the default behaviour, i.e. ACLs support</li>
+                        <li># format: noacls (&quot;true&quot;|&quot;false&quot;)</li>
+                        <li></li>
+                        <li>#noacls &quot;true&quot;</li>
+                        <li></li>
+                        <li></li>
+                        <li>### filesystems not on LVM</li>
+                        <li># format: fs &lt;name&gt; (&lt;device-path&gt;|UUID=&lt;uuid&gt;) [&lt;path-to-exclude&gt; ...]</li>
+                        <li></li>
+                        <li>fs &quot;boot&quot; &quot;UUID=621393c4-1827-4b6a-b053-1f249a844626&quot;</li>
+                        <li></li>
+                        <li></li>
+                        <li>### filesystems on top of LVM</li>
+                        <li># format: lv &lt;name&gt; &lt;group&gt; &lt;snapshot-size&gt;% [&lt;path-to-exclude&gt; ...]</li>
+                        <li></li>
+                        <li>lv &quot;rootfs&quot; &quot;mg-baxic-prod&quot; &quot;20%&quot;</li>
+                        <li>lv &quot;usr&quot; &quot;mg-baxic-prod&quot; &quot;20%&quot;</li>
+                        <li>lv &quot;var&quot; &quot;mg-baxic-prod&quot; &quot;80%&quot;</li>
+                        <li>lv &quot;srv&quot; &quot;mg-baxic-prod&quot; &quot;80%&quot;</li>
+                        <li></li>
+                        <li># don&#039;t backup tmp because it&#039;s only temporary location and its contents is</li>
+                        <li># often deleted on system startup on some systems</li>
+                        <li>#lv &quot;tmp&quot; &quot;mg-baxic-prod&quot; &quot;80%&quot;</li>
+                        <li></li>
+                        <li>lv &quot;vartmp&quot; &quot;mg-baxic-prod&quot; &quot;80%&quot;</li>
+                        <li>lv &quot;varmail&quot; &quot;mg-baxic-prod&quot; &quot;80%&quot;</li>
+                        <li></li>
+                        <li># don&#039;t backup varlock because it&#039;s only temporary location and its contents</li>
+                        <li># is often deleted on system startup on some systems, moreover, varlock cannot</li>
+                        <li># be remounted read-only because LVM creates file locks in it during snapshot</li>
+                        <li># creation</li>
+                        <li>#lv &quot;varlock&quot; &quot;mg-baxic-prod&quot; &quot;80%&quot;</li>
+                        <li></li>
+                        <li>lv &quot;home&quot; &quot;mg-baxic-prod&quot; &quot;20%&quot; &quot;./baxic/data&quot;</li>
+                      </ul>
+                    </div>
+                  </div>
+                  <p class="block">
+                    Supported directives are concisely described directly in the configuration file.
+                  </p>
+                  <p class="block">
+                    The <code class="code">lvsnapsuffix</code> entry defines the suffix that is appended to the names of the <em class="italic">LVM</em> volumes to get the corresponding <em class="italic">LVM</em> snapshot volume names.
+                  </p>
+                  <p class="block">
+                    The <code class="code">noacls</code> entry can disable support for <em class="italic">POSIX</em> <em class="italic">ACLs</em>. This becomes important on older systems whose <em class="italic">GNU tar</em> version doesn&#039;t support the <code class="code">--acls</code> option yet.
+                  </p>
+                  <p class="block">
+                    All other directives, i.e. the <code class="code">fs</code> and <code class="code">lv</code> items specify the filesystems to backup. The <code class="code">fs</code> directive refers to <em class="italic">non-LVM</em> devices with filesystems that are remounted read-only during the whole backup process. The device can be specified either by device path or by its <em class="italic">UUID</em>.
+                  </p>
+                  <p class="block">
+                    The <code class="code">lv</code> lines refer to <em class="italic">LVM</em> logical volumes by their names and volume groups they belong to. Because new snapshot logical volume is created for each logical volume to backup in the <code class="code">tar-lvm</code> <code class="code">pre</code> mode, its size must be specified as a certain number of percents of its origin.
+                  </p>
+                  <p class="block">
+                    Furhtermode, both <code class="code">fs</code> and <code class="code">lv</code> entries can contain more optional arguments that list directories or files that should be excluded from the backup. See the <code class="code">lv</code> entry for the <code class="code">home</code> filesystem above for an example. The path should always start with a dot and is relative to the filesystem root directory.
+                  </p>
+                  <p class="block">
+                    To confirm the validity of new configuration, the following command sequence should succeed. Be prepared for short downtime of your services again if you&#039;re using <em class="italic">LVM</em> or for longer downtime comprising the whole backup process if your read-write filesystems are not on <em class="italic">LVM</em>.
+                  </p>
+                  <div class="block">
+                    <div class="commands">
+                      <ul>
+                        <li>mkdir /tmp/tar-lvm-test</li>
+                        <li>ssd-backup -u -v stop</li>
+                        <li>tar-lvm -v pre</li>
+                        <li>tar-lvm -v -f run 0 /tmp/tar-lvm-test</li>
+                        <li>tar-lvm -v post</li>
+                        <li>ssd-backup -u -v start</li>
+                      </ul>
+                    </div>
+                  </div>
+                  <h5 class="block">
+                    <a id="automating_the_backup" name="automating_the_backup">
+                      Automating the backup
+                    </a>
+                  </h5>
+                  <h6 class="block">
+                    <a id="wrapper_script_for_one_host_backup_tar_lvm_one" name="wrapper_script_for_one_host_backup_tar_lvm_one">
+                      Wrapper script for one host backup: tar-lvm-one
+                    </a>
+                  </h6>
+                  <p class="block">
+                    The <strong class="bold"><em class="italic">tar-lvm-one</em></strong> wrapper script must be configured to simplify the automation of a backup of a specific host. This script invokes the commands described and configured earlier and also mounts and unmounts the backup device in between.
+                  </p>
+                  <p class="block">
+                    This wrapper script can be configured either on each host separately in local configuration files or in a shared configuration file located on one host denoted as <code class="code">allhost</code> in the local configuration. The syntax of both files is identical and the directives specified in the local configuration file override the shared directives. The shared configuration doesn&#039;t have to be used. This is the case if no <code class="code">allhost</code> directive is present in the local file. However, the local configuration file cannot be omitted and must specify all needed directives locally or at least the <code class="code">allhost</code> directive pointing to the host with shared configuration.
+                  </p>
+                  <p class="block">
+                    Let&#039;s now look at an example configuration shared among more hosts from one <code class="code">allhost</code>. The local configuration must then contain the <code class="code">allhost</code> directive on each host. All other entries are optional and become useful only if the shared configuration should be overriden by something more specific on certain host.
+                  </p>
+                  <p class="block">
+                    The local configuration file <span class="file">/usr/local/etc/tar-lvm/tar-lvm-one.local.conf</span> must contain at least the following part in our example.
+                  </p>
+                  <div class="block">
+                    <div class="contents">
+                      <ul>
+                        <li># hostname of the machine that contains the shared configuration file</li>
+                        <li># (and usually runs the tar-lvm-all script if used - hence the name),</li>
+                        <li># the machine must be accessible by ssh public key authentication, i.e.</li>
+                        <li># without using a password, comment the allhost line if no shared configuration</li>
+                        <li># file should be copied to localhost and used</li>
+                        <li># format: allhost &lt;hostname&gt;[:&lt;hostname_fqdn&gt;]</li>
+                        <li></li>
+                        <li>allhost &quot;baxic-pm:baxic-kvm-1.domain.org&quot;</li>
+                      </ul>
+                    </div>
+                  </div>
+                  <p class="block">
+                    In this case, the shared configuration file <span class="file">/usr/local/etc/tar-lvm/tar-lvm-one.shared.conf</span> must define all other directives.
+                  </p>
+                  <div class="block">
+                    <div class="contents">
+                      <ul>
+                        <li># disable sshfs backup filesystem support, just comment for the default</li>
+                        <li># behaviour, i.e. both block device and sshfs support</li>
+                        <li># format: nosshfs (&quot;true&quot;|&quot;false&quot;)</li>
+                        <li></li>
+                        <li>#nosshfs &quot;true&quot;</li>
+                        <li></li>
+                        <li></li>
+                        <li># backup device, either local device or remote sshfs filesystem, the local</li>
+                        <li># device is specified by name (not by whole path) or by UUID and the device</li>
+                        <li># must be located in the /dev directory, the remote sshfs filesystem is</li>
+                        <li># specified by the host and optional user and path</li>
+                        <li># format: dev (&lt;name&gt;|UUID=&lt;uuid&gt;|[&lt;user&gt;@]&lt;host&gt;:[&lt;path&gt;])</li>
+                        <li></li>
+                        <li>#dev &quot;UUID=f3d286d1-aa4a-6f32-a367-ab93e72cbfa8&quot;</li>
+                        <li>dev &quot;root@baxic-nas.domain.org:/backup-data&quot;</li>
+                        <li></li>
+                        <li></li>
+                        <li># device mapper name used by cryptsetup if the backup device is local and</li>
+                        <li># if it is encrypted by LUKS, comment the dm line if the backup device isn&#039;t</li>
+                        <li># encrypted</li>
+                        <li># format: dm &lt;dmname&gt;</li>
+                        <li></li>
+                        <li>dm &quot;backup&quot;</li>
+                        <li></li>
+                        <li></li>
+                        <li># backup filesystem mount point</li>
+                        <li># format: mntdir &lt;bkpfsmntdir&gt;</li>
+                        <li></li>
+                        <li>mntdir &quot;/mnt/backup&quot;</li>
+                        <li></li>
+                        <li></li>
+                        <li># directory on the backup filesystem containing the backup directory tree</li>
+                        <li># format: rootdir &lt;bkprootdir&gt;</li>
+                        <li></li>
+                        <li>rootdir &quot;tar-lvm&quot;</li>
+                        <li></li>
+                        <li></li>
+                        <li># defer ssd-backup start after the whole backup is complete or comment</li>
+                        <li># for the default behaviour, i.e. ssd-backup start after tar-lvm pre</li>
+                        <li># (ssd-backup stop, tar-lvm pre, ssd-backup start, tar-lvm run, tar-lvm post)</li>
+                        <li># format: deferssdstart (&quot;true&quot;|&quot;false&quot;)</li>
+                        <li></li>
+                        <li>#deferssdstart &quot;true&quot;</li>
+                      </ul>
+                    </div>
+                  </div>
+                  <p class="block">
+                    The <code class="code">nosshfs</code> entry supresses usage of the remote <em class="italic">SSHFS</em> backup filesystem and also the check that the <code class="code">sshfs</code> and <code class="code">fusermount</code> binaries are present. It should be therefore used on systems without these binaries installed.
+                  </p>
+                  <p class="block">
+                    As mentioned earlier, the backup device can be either a local device defined by its name or <em class="italic">UUID</em> or a remote <em class="italic">SSHFS</em> filesystem. All possibilities are specified by the <code class="code">dev</code> line depending on its syntax.
+                  </p>
+                  <p class="block">
+                    If the backup filesystem is located at a local device and if it is encrypted by <em class="italic">LUKS</em>, the <code class="code">dm</code> line is required. It instructs <code class="code">tar-lvm-one</code> to ask for password and decrypt the device before it is mounted.
+                  </p>
+                  <p class="block">
+                    The <code class="code">mntdir</code> entry is a mount point of the backup filesystem, i.e. a directory to which the backup filesystem is mounted during the backup.
+                  </p>
+                  <p class="block">
+                    And the <code class="code">rootdir</code> line specifies a path to an existing directory on the backup filesystem where the backups and logs should be stored.
+                  </p>
+                  <p class="block">
+                    There&#039;s one more optional entry in the configuration file and that&#039;s the <code class="code">deferssdstart</code> flag. If it is set to <code class="code">true</code>, it instructs the script to defer <code class="code">ssd-backup start</code> as the last operation. The default behaviour differs, <code class="code">ssd-backup start</code> is invoked immediately after the <em class="italic">LVM</em> snapshots are created, i.e. before the <code class="code">tar</code> backup itself. This becomes handy if some read-write filesystem is not located on <em class="italic">LVM</em> and if no snapshot can be thus created.
+                  </p>
+                  <p class="block">
+                    The <code class="code">tar-lvm-one</code> configuration and backup can be tested as follows:
+                  </p>
+                  <div class="block">
+                    <div class="commands">
+                      <ul>
+                        <li>tar-lvm-one -f all 0</li>
+                      </ul>
+                    </div>
+                  </div>
+                  <h6 class="block">
+                    <a id="choosing_the_triggering_model_centralized_or_distributed" name="choosing_the_triggering_model_centralized_or_distributed">
+                      Choosing the triggering model: centralized or distributed
+                    </a>
+                  </h6>
+                  <p class="block">
+                    There&#039;re two ways how to trigger the backups on all hosts: centralized or distributed. The first <strong class="bold">centralized</strong> way must be used if you need to backup whole physical machine with separate backups of its <em class="italic">KVM</em> virtual machines to a device that is connected directly to the physical machine. The reason is that it needs to attach and detach the backup device to the virtuals. However, if you want to backup just via <em class="italic">SSH</em> with the exception of the machine the device is connected to, you can choose whether to use the <strong class="bold">distributed</strong> or <strong class="bold">centralized</strong> triggering model.
+                  </p>
+                  <p class="block">
+                    The main difference between both models even if using just a <em class="italic">SSHFS</em> storage is that the centralized way is managed by the <code class="code">tar-lvm-all</code> script which controls the whole process, the backups are triggered sequentially and there&#039;s a maximal number of parallel backups that can run at once. The distributed way is managed and controlled on each host separately, backups are usually triggered from the <em class="italic">Cron</em> scheduler at a specific time and they all run independently of each other. Both models use the <code class="code">tar-lvm-one</code> wrapper script. This script is invoked by <code class="code">tar-lvm-all</code> in the former case, i.e. in the centralized model, and directly from <em class="italic">Cron</em> in the latter case, i.e. in the distributed model.
+                  </p>
+                  <p class="block">
+                    In fact, both models can be combined and used at once, but there&#039;s one significant limitation. If <code class="code">tar-lvm-all</code> attaches the backup device to some of its virtuals that store the backups directly to this device, the distributed model shouldn&#039;t be mixed up with the centralized one unless it uses different backup device. The backup device can be mounted just by one machine at a time if using the direct access to avoid data corruption.
+                  </p>
+                  <h6 class="block">
+                    <a id="centralized_triggering_model_tar_lvm_all" name="centralized_triggering_model_tar_lvm_all">
+                      Centralized triggering model: tar-lvm-all
+                    </a>
+                  </h6>
+                  <p class="block">
+                    If you chose the centralized model of triggering the backups, let&#039;s proceed with configuration of the <strong class="bold"><em class="italic">tar-lvm-all</em></strong> script. This script must run on the physical machine the backup device is connected to if this machine or its <em class="italic">KVM</em> virtuals do not want to use <em class="italic">SSHFS</em>, but the more efficient direct access method to access the backup device. Otherwise if all hosts to backup store their backups remotely using <em class="italic">SSHFS</em>, it can be run on any host - even on a host that&#039;s not going to be backed up.
+                  </p>
+                  <p class="block">
+                    The <code class="code">tar-lvm-all</code> configuration file is located at <span class="file">/usr/local/etc/tar-lvm/tar-lvm-all.conf</span> and it looks as follows.
+                  </p>
+                  <div class="block">
+                    <div class="contents">
+                      <ul>
+                        <li># backup device on the physical machine if at least one backup to local</li>
+                        <li># device should be performed (not needed for SSHFS), the device is</li>
+                        <li># specified by name (not by whole path) or by UUID and it must be</li>
+                        <li># be located in the /dev directory, it can be either whole disk,</li>
+                        <li># partition or volume etc.</li>
+                        <li># format: pmdev (&lt;name&gt;|UUID=&lt;uuid&gt;)</li>
+                        <li></li>
+                        <li>pmdev &quot;UUID=0da345bc&quot;</li>
+                        <li></li>
+                        <li></li>
+                        <li># backup device to create on the virtual machines if at least one backup</li>
+                        <li># to local device should be performed (not needed for SSHFS), the device</li>
+                        <li># is specified by name (not by whole path)</li>
+                        <li># format: vmdev &lt;name&gt;</li>
+                        <li></li>
+                        <li>vmdev &quot;vdb&quot;</li>
+                        <li></li>
+                        <li></li>
+                        <li># set to &quot;true&quot; to enable password prompt, the prompt is needed if the backup</li>
+                        <li># device is encrypted and a password should be therefore passed to tar-lvm-one</li>
+                        <li># (for each virtual machine), just comment if not needed</li>
+                        <li># format: passprompt (&quot;true&quot;|&quot;false&quot;)</li>
+                        <li></li>
+                        <li>passprompt &quot;true&quot;</li>
+                        <li></li>
+                        <li></li>
+                        <li># set to &quot;true&quot; if you want to backup the physical machine as well, otherwise</li>
+                        <li># comment or set to &quot;false&quot;, the machine must be accessible as localhost by ssh</li>
+                        <li># public key authentication, i.e. without using a password</li>
+                        <li># format: pmbackup (&quot;true&quot;|&quot;false&quot;)</li>
+                        <li></li>
+                        <li>pmbackup &quot;true&quot;</li>
+                        <li></li>
+                        <li></li>
+                        <li># names of the virtual machines to backup, the names are hostnames as well,</li>
+                        <li># but you can specify different hostname appended to the machine name</li>
+                        <li># behind a colon, e.g. as &quot;machine:host.domain.org&quot;, the machines must</li>
+                        <li># be accessible by ssh public key authentication, i.e. without using</li>
+                        <li># a password</li>
+                        <li># format: vm &lt;hostname&gt;[:&lt;hostname_fqdn&gt;]</li>
+                        <li></li>
+                        <li>vm &quot;baxic-prod&quot;</li>
+                        <li>vm &quot;baxic-prod-old&quot;</li>
+                        <li></li>
+                        <li></li>
+                        <li># hosts to backup using sshfs, the names are hostnames as well, but</li>
+                        <li># you can specify different hostname appended to the host name</li>
+                        <li># behind a colon, e.g. as &quot;host:host.domain.org&quot;, hosts must be accessible</li>
+                        <li># by ssh public key authentication, i.e. without using a password</li>
+                        <li># format: host &lt;hostname&gt;[:&lt;hostname_fqdn&gt;]</li>
+                        <li></li>
+                        <li>host &quot;baxic-test-1&quot;</li>
+                        <li>host &quot;baxic-test-2&quot;</li>
+                        <li>host &quot;baxic-test-3&quot;</li>
+                        <li></li>
+                        <li></li>
+                        <li># number of hosts to backup in parallel, remaining hosts must wait until</li>
+                        <li># the preceding backups finish, this setting doesn&#039;t apply to vm&#039;s (i.e.</li>
+                        <li># virtual machines) that are always backed up one by one</li>
+                        <li># format: parhostnum &lt;number&gt;</li>
+                        <li></li>
+                        <li>parhostnum 2</li>
+                        <li></li>
+                        <li></li>
+                        <li># notification email addresses</li>
+                        <li># format: mailto &lt;email&gt;</li>
+                        <li></li>
+                        <li>mailto &quot;backup@domain.org&quot;</li>
+                        <li></li>
+                        <li></li>
+                        <li># SMTP server if neither mail nor mailx (i.e. local MTA) should be used</li>
+                        <li># and SMTP should be used directly, simply comment if local MTA should be</li>
+                        <li># used instead</li>
+                        <li># format: smtp[-tls|s]://[USER:PASS@]SERVER[:PORT]]</li>
+                        <li></li>
+                        <li>#smtpserver &quot;smtp-tls://user@gmail.com:secret@smtp.googlemail.com&quot;</li>
+                        <li></li>
+                        <li></li>
+                        <li># notification email sender if smtpserver is specified</li>
+                        <li># format: mailfrom &lt;email&gt;</li>
+                        <li></li>
+                        <li>mailfrom &quot;user@gmail.com&quot;</li>
+                      </ul>
+                    </div>
+                  </div>
+                  <p class="block">
+                    If at least one <em class="italic">KVM</em> virtual machine is backed up to a local device connected to the physical machine and not to a remote <em class="italic">SSHFS</em> filesystem, both <code class="code">pmdev</code> and <code class="code">vmdev</code> entries must be defined. The <code class="code">pmdev</code> entry defines the backup device on the physical machine that should be connected as the <code class="code">vmdev</code> device to the virtual machines. However, both entries are required only if at least one <code class="code">vm</code> entry is present.
+                  </p>
+                  <p class="block">
+                    Another optional entry is the <code class="code">passprompt</code> flag. It instructs <code class="code">tar-lvm-all</code> to ask for password that should be passed to <code class="code">tar-lvm-one</code> if the backup device is encrypted.
+                  </p>
+                  <p class="block">
+                    The <code class="code">pmbackup</code> flag determines whether to backup the physical machine (i.e. the machine the script runs at) or not. If it is set to true, <code class="code">root@localhost</code> must be accessible from <code class="code">root@localhost</code> by <em class="italic">SSH</em> public key authentication, because the backup is performed in the same way as in the case of backing up other host. Just the backup device doesn&#039;t have to be attached.
+                  </p>
+                  <p class="block">
+                    The most important entries are the <code class="code">vm</code> and <code class="code">host</code> directives that specify the nodes to backup. More specifically, the virtual machines with direct access to the backup device and hosts to backup remotely via <em class="italic">SSH</em>. Their names are especially important by the <code class="code">vm</code> lines because they are equal to the names of the <em class="italic">KVM</em> virtual machines. They can be also used to refer to <em class="italic">DNS</em> hostnames if they belong to the resolver search domain, but if the names are not resolvable, an optional colon can be used to append <em class="italic">FQDN</em>, <em class="italic">IP</em> address or another resolvable hostname entry.
+                  </p>
+                  <p class="block">
+                    There&#039;s one more entry that influences the way how the remote <em class="italic">SSHFS</em> backups are triggered - the <code class="code">parhostnum</code> directive. It specifies maximal number of hosts to backup in parallel and if this number of hosts being backed up is reached, all reamining hosts must wait.
+                  </p>
+                  <p class="block">
+                    The remaining lines configure email notification and they&#039;re mostly self-explanatory. The only important thing to take into account that may not be obvious is the fact that if no <code class="code">smtpserver</code> directive is specified, then local <em class="italic">MTA</em> is used to deliver emails. If it is specified, emails are delivered directly via <em class="italic">SMTP</em> to the specified mail server. However, that&#039;s not the preferred solution. If the delivery fails, there&#039;s neither a way how to inform about the error nor any later repeated delivery attempt. The error output can get lost easily.
+                  </p>
+                  <p class="block">
+                    If you want to test the backup for all machines and hosts, simply invoke <code class="code">tar-lvm-all</code> on the host that manages the backup process centrally.
+                  </p>
+                  <div class="block">
+                    <div class="commands">
+                      <ul>
+                        <li>tar-lvm-all -v -f all 0</li>
+                      </ul>
+                    </div>
+                  </div>
+                  <h6 class="block">
+                    <a id="distributed_triggering_model_tar_lvm_one" name="distributed_triggering_model_tar_lvm_one">
+                      Distributed triggering model: tar-lvm-one
+                    </a>
+                  </h6>
+                  <p class="block">
+                    If you chose the distributed model of triggering the backups, there&#039;s no need to configure any other tool, because <code class="code">tar-lvm-one</code> is used for this purpose and this script was already configured earlier.
+                  </p>
+
+                </div>
+
+              </div>
+
+              <p class="nomargin nopadding">&nbsp;</p>
+
+              <div class="cleaner">&nbsp;</div>
+            </div><!-- content -->
+
+          </div><!-- main1 -->
+
+        </div><!-- maincontainer1 -->
+
+        <div id="footer">
+
+          <div class="footer_middle">
+            <p class="block">
+              The contents of this page is distributed under the
+              <a href="http://www.gnu.org/licenses/fdl.html">GNU FDL</a>
+              license.
+            </p>
+          </div>
+
+        </div><!-- footer -->
+
+      </div><!-- wrapper -->
+
+    </div><!-- wrapper_outter -->
+
+  </body>
+
+
+</html>

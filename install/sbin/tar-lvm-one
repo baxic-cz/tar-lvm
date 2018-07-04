@@ -1,0 +1,1774 @@
+#!/bin/bash
+
+###############################################################################
+#
+# script: tar-lvm-one
+# author: Lukas Baxa alias Baxic <baxic-cs@seznam.cz>
+#
+# This script is free software; you can redistribute it and/or modify it
+# under the terms of the GNU General Public License as published by the
+# Free Software Foundation; either version 3, or (at your option) any later
+# version.
+#
+###############################################################################
+
+
+# set program name
+PROGNAME='tar-lvm-one'
+PNSPACES='           '
+
+# set versions
+SCRIPT_VERSION='00.21'
+SUITE_VERSION='00.80'
+
+# set configuration directory and files
+CONFDIR='/usr/local/etc/tar-lvm'
+WORKDIR='/var/local/tar-lvm'
+CONFFILE_LOCAL='tar-lvm-one.local.conf'
+CONFFILE_SHARED='tar-lvm-one.shared.conf'
+
+# set uuid filename
+UUID_FILE="uuid.list.$PROGNAME"
+
+# set tmpfs size in bytes
+TMPFS_SIZE="$((20*1024*1024))"
+
+# exit commands array and clean exit running flag
+unset EXIT_CMDS
+CE_RUNNING=1
+
+# script result as a string, i.e. its exit status printed at the end
+RESULT='FAILURE'
+
+# configuration variables, i.e. physical machine/host, no sshfs flag, backup
+# device, device mapper name if backup device is encrypted, mountpoint
+# and backup root directory on the backup filesystem
+unset ALLHOST
+unset NOSSHFS
+unset DEV
+unset DM
+unset MNTDIR
+unset ROOTDIR
+unset DEFERSSDSTART
+
+# check_tools() tool1 ... toolN
+#   check if all the external tools tool1 ... toolN and which are available
+#   on the system
+# return: exit - some of the tools are missing
+#         0 - ok
+check_tools() {
+
+    local fail fst
+    local tool
+
+    if ! which which >/dev/null 2>&1; then
+        echo "$PROGNAME: cannot find the 'which' command that is necessary" >&2
+        exit 1
+    fi
+
+    fail=1
+    fst=0
+    for tool in "$@"; do
+        if ! which "$tool" >/dev/null 2>&1; then
+            if [[ "$fst" = 0 ]]; then
+                echo "$PROGNAME: cannot find the following tools/commands that are necessary" >&2
+                fst=1
+            fi
+            echo "  '$tool'" >&2
+            fail=0
+        fi
+    done
+
+    [[ "$fail" = 0 ]] && exit 1
+    return 0
+    
+}
+
+
+# usage() [exit_code]
+#   print the usage info and exit with given exit code (default 0)
+# return: exit
+usage() {
+
+    local ec="${1:-0}"
+    if [[ "$ec" != 0 ]]; then
+        exec >&2
+    fi
+
+    echo "$PROGNAME - tar-lvm and ssd-backup wrapper for one machine"
+    echo
+    echo "    ($PROGNAME version: $SCRIPT_VERSION, tar-lvm suite version: $SUITE_VERSION)"    
+    echo
+    echo "usage: $PROGNAME -h | help"
+    echo "       $PROGNAME pre level"
+    echo "       $PROGNAME [-f] run level"
+    echo "       $PROGNAME post level"
+    echo "       $PROGNAME [-f] all level"
+    echo "       $PROGNAME check level"
+    echo "       $PROGNAME clean"
+    echo
+    echo '    -h | help ... print help and exit'
+    echo '    pre ... prepare the system for the backup, i.e. mount backup disk,'
+    echo "            run 'ssd-backup -u stop', 'tar-lvm pre' and 'ssd-backup -u start'"
+    echo '            and umount backup disk'
+    echo "    run ... mount backup disk, run 'tar-lvm run level outdir' and"
+    echo '            unmount backup disk'
+    echo "    post ... finalize the backup, i.e. mount backup disk, run 'tar-lvm post'"
+    echo '             unmount backup disk'
+    echo '    all ... all phases, i.e. pre, run and post in this order, backup disk'
+    echo '            is mounted and unmounted just once'
+    echo '    check ... check the result of the backup of the specified level'
+    echo '              and of all preceding levels'
+    echo '    clean ... perform cleanup, this may be needed if the script terminates'
+    echo '              unexpectedly, e.g. it it is killed by a signal, if the system'
+    echo '              is restarted or halted etc.'
+    echo '    level ... level of the incremental backup, i.e. non-negative integer'
+    echo "    -f ... force the backup, pass this argument to 'tar-lvm'"
+    echo
+
+    exit "$ec"
+
+}
+
+
+# parse_args() arg1 ... argN
+#   parse the command-line arguments and set the global variables ARG_MODE,
+#   ARG_LEVEL and ARG_F
+# return: exit - wrong arguments are given
+#         0 - ok
+parse_args() {
+
+    local arg
+
+    ARGNUM=0
+    ARG_MODE=''
+    ARG_LEVEL=''
+
+    ARG_F='n'
+
+    for arg in "$@"; do
+	case "$arg" in
+            '-f') 
+                [[ "$ARG_F" = 'y' ]] && usage 1
+                ARG_F='y'
+                ;;
+            *)
+                if [[ "${arg:0:1}" = '-' \
+		    && ( "$arg" != '-h' || "$ARGNUM" -gt 0 ) ]]; then
+                    usage 1
+                else            
+                    ARGNUM="$((ARGNUM+1))"
+		    case "$ARGNUM" in
+			1)
+			    case "$arg" in
+				'-h' | 'help')
+				    ARG_MODE='help'
+				    ;;
+				'pre' | 'run' | 'post' | 'all' | 'clean' | 'check')
+				    ARG_MODE="$arg"
+				    ;;
+				*)
+				    usage 1
+				    ;;
+			    esac
+			    ;;
+			2)
+			    ARG_LEVEL="$arg"
+			    ;;
+		    esac
+                fi
+		;;
+        esac
+    done    
+
+    if [[ -z "$ARG_MODE" ]]; then
+        usage 1
+    elif [[ "$ARG_MODE" = 'help' || "$ARG_MODE" = 'clean' ]]; then
+        [[ "$ARGNUM" -ne 1 || "$ARG_F" = 'y' ]] && usage 1
+    elif [[ "$ARG_MODE" = 'pre' || "$ARG_MODE" = 'post' || "$ARG_MODE" = 'check' ]]; then
+        [[ "$ARGNUM" -ne 2 || "$ARG_F" = 'y' ]] && usage 1
+    elif [[ "$ARG_MODE" = 'run' || "$ARG_MODE" = 'all' ]]; then
+        [[ "$ARGNUM" -ne 2 ]] && usage 1
+    fi
+
+    return 0
+    
+}
+
+
+# check_args()
+#   check that the command-line arguments are correct, must be called after
+#   parse_args
+# return: exit - the arguments are not correct
+#         0 - ok
+check_args() {
+
+    if [[ "$ARG_MODE" = 'pre' || "$ARG_MODE" = 'run' ||
+		"$ARG_MODE" = 'post' || "$ARG_MODE" = 'all' ||
+		"$ARG_MODE" = 'check' ]]; then
+        if ! echo "$ARG_LEVEL" | grep -Eq '^[0-9]+$'; then
+            echo "$PROGNAME: level must be a non-negative integer" >&2
+            exit 1
+        fi
+    fi
+
+    return 0
+    
+}
+
+
+# add_exit_cmd exit_cmd
+#   add exit command to be invoked when clean_exit is invoked, the command
+#   is just one argument to be invoked via eval
+# return: 0 - ok
+add_exit_cmd() {
+
+    local cmd="$1"
+    local i
+
+    i="${#EXIT_CMDS[@]}"
+    EXIT_CMDS[i]="$cmd"
+
+    return 0;
+
+}
+
+
+# del_exit_cmd [exit_cmd_number]
+#   remove exit command to be invoked when clean_exit is invoked, the command
+#   number can be specified, if it is not, the last command is removed if any
+# return: 0 - ok
+del_exit_cmd() {
+
+    local i="$1"
+    local j
+
+    if [[ "${#EXIT_CMDS[@]}" -gt 0 ]]; then
+	
+	if [[ -z "$i" ]]; then
+	    j="$(( ${#EXIT_CMDS[@]} - 1 ))"
+	    unset EXIT_CMDS[j]
+	else
+	    EXIT_CMDS[i]=''
+	fi
+
+    fi
+    
+    return 0;
+
+}
+
+
+# run_exit_cmds
+#   invoke all registered exit commands in the opposite order in which they
+#   were registered, but do not actually exit, then remove all exit commands
+# return: 0 - ok
+#         1 - some exit command failed
+run_exit_cmds() {
+
+    local i n
+    local cmd
+    local eval_ec ec=0
+
+    n="${#EXIT_CMDS[@]}"
+    for ((i=n-1; i>=0; i--)); do
+
+	cmd="${EXIT_CMDS[i]}"
+	if [[ -n "$cmd" ]]; then
+	    eval "$cmd"
+	    eval_ec="$?"
+	fi
+
+	if [[ "$eval_ec" -ne 0 ]]; then
+	    ec=1
+	fi
+
+    done
+
+    unset EXIT_CMDS
+    
+    return "$ec"
+    
+}
+
+
+# clean_exit [ec]
+#   exit cleanly, i.e. invoke all registered exit commands before exiting
+#   in the opposite order in which they were registered, the exit commands
+#   can be (de)registered by using add_exit_cmd/del_exit_cmd, finally,
+#   exit with the given exit code or with 1 if no exit code is given
+#   and some command fails
+# return: exit
+clean_exit() {
+
+    local ec_orig="${1:-0}"
+    local i n
+    local cmd
+    local ec=0
+
+    CE_RUNNING=0
+
+    run_exit_cmds
+    [[ "$?" -ne 0 ]] && ec=1
+    
+    [[ "$ec_orig" = 0 && "$ec" != 0 ]] && ec_orig="$ec"
+    exit "$ec_orig"
+
+}
+
+
+# print_result()
+#   print the final status of the script, i.e. its result
+# return: 0 - ok
+print_result() {
+
+    echo
+    echo "$PROGNAME: result => $RESULT"
+    echo
+    
+}
+
+
+# check_root_id()
+#   check that the command is called by root
+# return: exit - the command is not called by root
+#         0 - ok or clean exit in progress
+check_root_id() {
+
+    [[ "$CE_RUNNING" = 0 ]] && return 0
+
+    if [ $(id -u) != 0 ]; then
+        echo "$PROGNAME: you must be root in order to use this script" >&2
+        clean_exit 2
+    fi
+
+    return 0
+    
+}
+
+
+# check_if_running()
+#   check that this script is not running yet
+# return: exit - the script is already running
+#         0 - ok
+check_if_running() {
+
+    if [[ -f "/var/run/$PROGNAME.pid" ]]; then
+
+	if [[ "$(ps -p "$(cat "/var/run/$PROGNAME.pid")" -o 'comm=')" = "$PROGNAME" ]]; then
+
+            echo "$PROGNAME: $PROGNAME already running" >&2
+            clean_exit 2
+	    
+	else
+
+	    rm -f "/var/run/$PROGNAME.pid"
+	    
+	fi
+
+    fi
+
+    echo "$$" >"/var/run/$PROGNAME.pid"
+    [[ "$?" -eq 0 ]] && add_exit_cmd "rm -f '/var/run/$PROGNAME.pid'"
+
+    return 0
+    
+}
+
+
+# check_work_dir
+#   check that the working directory exists and contains the subdirectory
+#   tmpfs with read/write permissions
+# return: exit - the configuration directory isn't all right
+#         0 - ok or clean exit in progress
+check_work_dir() {
+
+    [[ "$CE_RUNNING" = 0 ]] && return 0
+
+    if [[ ! -d "$WORKDIR/tmpfs" || ! -r "$WORKDIR/tmpfs" \
+        || ! -w "$WORKDIR/tmpfs" ]]; then
+        echo "$PROGNAME: the directory '$WORKDIR/tmpfs' doesn't exist," >&2
+        echo "$PNSPACES  isn't readable or writable" >&2
+        clean_exit 2
+    fi
+
+    return 0
+    
+}
+
+
+# check_proc_mounts()
+#   check that the file /proc/mounts is available and that it is readable
+# return: exit - the file isn't available in the pre, run or post mode
+#         0 - ok or clean exit in progress
+check_proc_mounts() {
+
+    [[ "$CE_RUNNING" = 0 ]] && return 0
+
+    if [[ ! -f '/proc/mounts' || ! -r '/proc/mounts' ]]; then
+	echo "$PROGNAME: the file '/proc/mounts' must exist and be readable, is the /proc" >&2
+	echo "$PNSPACES  filesystem mounted?" >&2
+	
+	clean_exit 2
+    fi
+
+    return 0
+    
+}
+
+
+# mount_tmpfs() size
+#   mount the tmpfs filesystem to the directory mntdir if not mounted yet,
+#   this filesystem remains read/write even if the tmp directory is already
+#   on a read-only filesystem
+# return: exit - cannot mount the tmpfs filesystem
+#         0 - ok or clean exit in progress
+mount_tmpfs() {
+
+    [[ "$CE_RUNNING" = 0 ]] && return 0
+
+    local size="$1"
+
+    if ! grep -Eq "^tmpfs[[:blank:]]+$WORKDIR/tmpfs" /proc/mounts; then
+	mount -t tmpfs  -o size="$size",mode=755,uid=0,gid=0 \
+            tmpfs "$WORKDIR/tmpfs"
+	if [[ $? -eq 0 ]]; then
+	    add_exit_cmd 'umount_tmpfs'
+	else
+            echo "$PROGNAME: cannot mount the tmpfs filesystem to the directory" >&2
+            echo "$PNSPACES  '$WORKDIR/tmpfs'" >&2
+            clean_exit 2	    
+	fi
+    fi
+
+    return 0
+    
+}
+
+
+# umount_tmpfs()
+#   unmount the tmpfs filesystem if it is mounted
+# return: 0 - ok (or not mounted)
+#         1 - cannot unmount the tmpfs filesystem
+umount_tmpfs() {
+
+    if grep -Eq "^tmpfs[[:blank:]]+$WORKDIR/tmpfs" /proc/mounts; then
+	umount "$WORKDIR/tmpfs"
+	if [[ $? -ne 0 ]]; then
+            echo "$PROGNAME: cannot unmount the tmpfs filesystem from the directory" >&2
+            echo "$PNSPACES  '$WORKDIR/tmpfs'" >&2
+	    return 1
+	fi
+    fi
+
+    return 0
+    
+}
+
+
+# read_config_file cfg_file
+#   read the configuration file cfg_file, each line of the configuration file
+#   which is not a comment consists of whitespace separated words, the words
+#   can be optionally enclosed in double quotes and can therefore also contain
+#   whitespace characters - space, tab, double quote and backslash may be part
+#   of a word too if they're escaped by a backslash, lines starting with #
+#   (optional whitespaces may precede #) are comments, currently only
+#   the allhost, dev, dm, mntdir and rootdir lines are supported, they are
+#   used to define the ALLHOST, NOSSHFS, DEV, DM, MNTDIR, ROOTDIR and
+#   DEFERSSDSTART global variables
+# return: exit -  the config file isn't readable or doesn't have correct format
+#         0 - ok or clean exit in progress
+read_config_file() {
+
+    [[ "$CE_RUNNING" = 0 ]] && return 0
+
+    local cfg_file="$1" cfg_cont
+    local linenum line str fch wrd
+    local ifs
+    local isallhost=1 isnosshfs=1 isdev=1 isdm=1 ismntdir=1 isrootdir=1
+    local isdeferssdstart=1
+
+    # check that the config file exists and is readable, then read it
+    if [[ -f "$cfg_file" && -r "$cfg_file" ]]; then
+	cfg_cont="$(cat "$cfg_file")"
+    else
+        echo "$PROGNAME: cannot read the configuration file '$cfg_file'" >&2
+	clean_exit 2
+    fi
+
+    # remove space, tab and newline from IFS so that the whole line
+    # including the leading whitespace is read by the read built-in
+    ifs="$IFS"
+    IFS=''
+
+    # read and process all lines from the file cfg_file
+    linenum=0
+    while read -r line; do
+        linenum="$((linenum+1))"
+
+        unset args
+        local -a args
+
+        # remove comments, i.e. lines beginning with #, optional whitespace
+        # may precede the # character
+        str=$(echo "$line" | sed -r 's/^([[:blank:]]*)#.*$/\1/')
+
+        # read words from the line read and store them into the args array
+        while true; do
+
+            # remove leading whitespace
+            str=$(echo "$str" | sed -nr 's#^[[:blank:]]*(.*)?$#\1#p')
+
+            # if there is no first character, i.e. no word, then break
+            fch="${str:0:1}"
+            if [[ -z "$fch" ]]; then
+                break
+
+            # if the first character isn't ", the word is delimited
+            # by whitespace that is not escaped by \
+            elif [[ "$fch" != '"' ]]; then
+                wrd=$(echo "$str" | sed -nr 's#^(([^[:blank:]"\\]*[\\][[:blank:]"\\])*[^[:blank:]"\\]*)([[:blank:]]+(.*))?$#\1#p')
+                str=$(echo "$str" | sed -nr 's#^(([^[:blank:]"\\]*[\\][[:blank:]"\\])*[^[:blank:]"\\]*)([[:blank:]]+(.*))?$#\4#p')
+
+            # if the first character is ", the word is delimited by
+            # double quotes that are not escaped by \ and the quoted words
+            # by whitespace
+            elif [[ "$fch" = '"' ]]; then
+                wrd=$(echo "$str" | sed -nr 's#^"(([^"\\]*[\\][[:blank:]"\\])*[^"\\]*)"([[:blank:]]+(.*))?$#\1#p')
+                str=$(echo "$str" | sed -nr 's#^"(([^"\\]*[\\][[:blank:]"\\])*[^"\\]*)"([[:blank:]]+(.*))?$#\4#p')
+            fi
+
+            # replace all characters escaped by \ in the word read
+            wrd=$(echo "$wrd" | sed -r 's#[\\]([[:blank:]"\\])#\1#g')
+
+            # store the resulting word into the args array
+            args[${#args[*]}]="$wrd"
+        done
+
+        # if the line has at least one word, check if it is correct and
+        # assign values to appropriate variables
+        if [[ ${#args[*]} -gt 0 ]]; then
+
+            case "${args[0]}" in
+
+                'allhost')             
+                    if [[ "$isallhost" = 0 ]]; then
+                        echo "$PROGNAME: allhost defined multiple times in the config file" >&2
+			clean_exit 2
+                    fi
+                    isallhost=0
+                    if [[ ${#args[*]} -ne 2 || -z "${args[1]}" ]]; then
+                        echo "$PROGNAME: incorrect format of the config line number $linenum:" >&2
+                        echo "$line" >&2
+			clean_exit 2
+                    fi
+                    ALLHOST="${args[1]}"
+                    ;;
+
+	        'nosshfs')
+                    if [[ "$isnosshfs" = 0 ]]; then
+                        echo "$PROGNAME: nosshfs defined multiple times in the config file" >&2
+			clean_exit 2
+                    fi
+                    isnosshfs=0
+                    if [[ ${#args[*]} -ne 2 || -z "${args[1]}" ]]; then
+                        echo "$PROGNAME: incorrect format of the config line number $linenum:" >&2
+                        echo "$line" >&2
+			clean_exit 2
+                    fi
+                    NOSSHFS="${args[1]}"
+		    ;;
+		
+                'dev')             
+                    if [[ "$isdev" = 0 ]]; then
+                        echo "$PROGNAME: dev defined multiple times in the config file" >&2
+			clean_exit 2
+                    fi
+                    isdev=0
+                    if [[ ${#args[*]} -ne 2 || -z "${args[1]}" ]]; then
+                        echo "$PROGNAME: incorrect format of the config line number $linenum:" >&2
+                        echo "$line" >&2
+			clean_exit 2
+                    fi
+                    DEV="${args[1]}"
+                    ;;
+
+                'dm')
+                    if [[ "$isdm" = 0 ]]; then
+                        echo "$PROGNAME: dm defined multiple times in the config file" >&2
+			clean_exit 2
+                    fi
+                    isdm=0
+                    if [[ ${#args[*]} -ne 2 || -z "${args[1]}" ]]; then
+                        echo "$PROGNAME: incorrect format of the config line number $linenum:" >&2
+                        echo "$line" >&2
+			clean_exit 2
+                    fi
+                    DM="${args[1]}"
+                    ;;
+
+                'mntdir')
+                    if [[ "$ismntdir" = 0 ]]; then
+                        echo "$PROGNAME: mntdir defined multiple times in the config file" >&2
+			clean_exit 2
+                    fi
+                    ismntdir=0
+                    if [[ ${#args[*]} -ne 2 || -z "${args[1]}" ]]; then
+                        echo "$PROGNAME: incorrect format of the config line number $linenum:" >&2
+                        echo "$line" >&2
+			clean_exit 2
+                    fi
+                    MNTDIR="${args[1]%/}"
+                    ;;
+
+                'rootdir')
+                    if [[ "$isrootdir" = 0 ]]; then
+                        echo "$PROGNAME: rootdir defined multiple times in the config file" >&2
+			clean_exit 2
+                    fi
+                    isrootdir=0
+                    if [[ ${#args[*]} -ne 2 || -z "${args[1]}" ]]; then
+                        echo "$PROGNAME: incorrect format of the config line number $linenum:" >&2
+                        echo "$line" >&2
+			clean_exit 2
+                    fi
+                    ROOTDIR="${args[1]%/}"
+                    ;;
+
+                'deferssdstart')
+                    if [[ "$isdeferssdstart" = 0 ]]; then
+                        echo "$PROGNAME: deferssdstart defined multiple times in the config file" >&2
+			clean_exit 2
+                    fi
+                    isdeferssdstart=0
+                    if [[ ${#args[*]} -ne 2 || -z "${args[1]}" ]]; then
+                        echo "$PROGNAME: incorrect format of the config line number $linenum:" >&2
+                        echo "$line" >&2
+			clean_exit 2
+                    fi
+                    DEFERSSDSTART="${args[1]}"
+		    ;;
+		
+                *)
+                    echo "$PROGNAME: incorrect format of the config line number $linenum:" >&2
+                    echo "$line" >&2
+		    clean_exit 2
+                    ;;
+            esac
+
+        fi
+
+    done <<EOF_TARLVMONE_CONF_821
+$(echo "$cfg_cont")
+EOF_TARLVMONE_CONF_821
+
+    IFS="$ifs"
+
+    return 0
+    
+}
+
+
+# check_config()
+#   check that the configuration is correct, i.e. that the DEV, MNTDIR and
+#   ROOTDIR values are defined, that the sshfs and fusermount binaries
+#   are found if sshfs isn't disabled and that no sshfs filesystem is
+#   specified in the configuration if sshfs is prohibited
+# return: exit -  the DEV, MNTDIR or ROOTDIR variable is empty
+#         0 - ok or clean exit in progress
+check_config() {
+
+    [[ "$CE_RUNNING" = 0 ]] && return 0
+
+    # check that sshfs and fusermount binaries exist if no sshfs directive
+    # is not specified, otherwise check that sshfs is not configured
+    if [[ -z "$NOSSHFS" ]]; then
+	if ! which sshfs >/dev/null; then
+	    echo "$PROGNAME: 'sshfs' binary not found and sshfs not disabled" >&2
+	    echo "$PNSPACES  in the config file" >&2
+	    clean_exit 2
+	fi
+
+	if ! which fusermount >/dev/null; then
+	    echo "$PROGNAME: 'fusermount' binary not found and sshfs not disabled" >&2
+	    echo "$PNSPACES  in the config file" >&2
+	    clean_exit 2
+	fi
+    else
+	if echo "$DEV" | grep -q ':'; then
+	    echo "$PROGNAME: sshfs disabled in the config file, but the backup device" >&2
+	    echo "$PNSPACES  configured as a sshfs filesystem" >&2
+	    clean_exit 2	    
+	fi	
+    fi
+
+    # check that the DEV, MNTDIR and ROOTDIR are defined
+    if [[ -z "$DEV" ]]; then
+        echo "$PROGNAME: backup device must be defined, edit the configuration file" >&2
+	clean_exit 2
+    fi
+
+    if [[ -z "$MNTDIR" || ! -d "$MNTDIR" ]]; then
+        echo "$PROGNAME: mount point of the backup device must be defined and must point" >&2
+	echo "$PNSPACES  to an existing directory, create the directory or edit" >&2
+	echo "$PNSPACES  the configuration file" >&2
+	clean_exit 2
+    fi
+
+    if [[ -z "$ROOTDIR" ]]; then
+        echo "$PROGNAME: directory on the backup filesystem containing the backup" >&2
+        echo "$PNSPACES  directory tree must be defined, edit the configuration file" >&2
+	clean_exit 2
+    fi
+
+    return 0
+    
+}
+
+
+# get_read_check_config() conflocal confshared
+#   read local configuration, if ALLHOST is defined then copy shared
+#   configuration file, store it to the tmpfs filesystem (which should already
+#   be mounted) and read it, then reread local configuration file once
+#   again to override shared settings by local ones if specified, finally
+#   check configuration
+# return: exit - cannot get shared configuration file from the host ALLHOST
+#                specified in the local configuration file, the configuration
+#                files aren't readable or do not have correct format or
+#                the configuration isn't correct
+#         0 - ok or clean exit in progress
+get_read_check_config() {
+
+    [[ "$CE_RUNNING" = 0 ]] && return 0
+
+    local conflocal="$1"
+    local confshared="$2"
+
+    local allhost_v allhost_h
+
+    read_config_file "$CONFDIR/$conflocal"
+
+    allhost_v="$(echo "$ALLHOST" | sed -r 's#^([^:]*):.*$#\1#')"
+    allhost_h="$(echo "$ALLHOST" | sed -r 's#^[^:]*:(.*)$#\1#')"
+    
+    if [[ -n "$ALLHOST" ]]; then
+	scp -q "$allhost_h:$CONFDIR/$confshared" "$WORKDIR/tmpfs"
+	if [[ "$?" -ne 0 ]]; then
+	    echo "$PROGNAME: cannot get shared configuration file from machine" >&2
+	    echo "$PNSPACES  '$allhost_v' and store it to the directory" >&2
+	    echo "$PNSPACES  '$WORKDIR/tmpfs', i.e. to the tmpfs filesystem" >&2
+	    clean_exit 2
+	fi
+    fi
+
+    if [[ -n "$ALLHOST" ]]; then
+	read_config_file "$WORKDIR/tmpfs/$confshared"
+	read_config_file "$CONFDIR/$conflocal"
+    fi
+
+    check_config
+
+    return 0
+    
+}
+
+
+# check_uuid_presence()
+#   check whether the UUID syntax is used in the configuration
+# return:
+#   0 - used
+#   1 - not used
+check_uuid_presence() {
+
+    echo "${DEV:0:5}" | grep -qi '^UUID=$'
+    [[ $? -eq 0 ]] && return 0
+
+    return 1
+    
+}
+
+
+# check_addon_tools()
+#   check if add-on tools that are necessary for proper operation are present
+#   in the system, the specific tools depend on given script arguments
+#   or configuration
+# return: exit - some of the tools are missing
+#         0 - ok
+check_addon_tools() {
+
+    [[ "$CE_RUNNING" = 0 ]] && return 0
+
+    local ec=0
+
+    # check that the blkid binary exists if UUID= is used in the configuration
+    if check_uuid_presence; then
+	if ! which blkid >/dev/null; then
+	    echo "$PROGNAME: 'blkid' binary not found and UUID= syntax used" >&2
+	    echo "$PNSPACES  in the config file" >&2
+	    ec=2
+	fi
+    fi
+
+    # check that cryptsetup binary exists if the backup device is encrypted,
+    # i.e. if the dm line is specified in the config file
+    if [[ -n "$DM" ]]; then
+	if ! which cryptsetup >/dev/null; then
+	    echo "$PROGNAME: 'cryptsetup' binary not found and the backup device" >&2
+	    echo "$PNSPACES  is encrypted according to the config file" >&2
+	    ec=2
+	fi
+    fi
+
+    [[ "$ec" -ne 0 ]] && clean_exit "$ec"
+    return 0
+    
+}
+
+
+# check_outdir()
+#   check that the output directory exists and contains cache and log
+#   subdirectories and if not then create them, all the directories should be
+#   readable and writable
+# return: exit - the output directory or its cache and log subdirectories
+#                do not exist and cannot be created, they're not readable
+#                and writable
+#         0 - ok or clean exit in progress
+check_outdir() {
+
+    [[ "$CE_RUNNING" = 0 ]] && return 0
+
+    local dir
+
+    for dir in "$OUTDIR" "$BKPDIR" "$LOGDIR"; do
+
+	if [[ ! -d "$dir" ]]; then	      
+	    mkdir -p "$dir"
+	    if [[ "$?" -ne 0 ]]; then		
+		echo "$PROGNAME: cannot create directory '$dir'" >&2
+		clean_exit 2
+	    fi
+	fi
+
+	[[ ! -r "$dir" ]] && chmod u+r "$dir"
+	[[ ! -w "$dir" ]] && chmod u+w "$dir"
+
+	if [[ ! -w "$dir" || ! -r "$dir" ]]; then
+	    echo "$PROGNAME: directory '$dir' not readable and writable" >&2
+	    clean_exit 2
+	fi
+
+    done
+
+    return 0
+    
+}
+
+
+# create_uuid_file
+#   find all block devices in /dev which have uuid assigned and create
+#   the UUID file in the tmpfs directory which maps uuids to devices
+# return: exit - cannot create uuid file
+#         0 - ok or clean exit in progress
+create_uuid_file() {
+
+    [[ "$CE_RUNNING" = 0 ]] && return 0
+
+    local dev
+    local uuid
+
+    if [[ -e "$WORKDIR/tmpfs/$UUID_FILE" ]]; then
+	rm -fr "$WORKDIR/tmpfs/$UUID_FILE"
+	if [[ $? -ne 0 ]]; then
+	    echo "$PROGNAME: cannot delete file '$UUID_FILE'" >&2
+	    echo "$PNSPACES  from the directory '$WORKDIR/tmpfs' on the tmpfs filesystem" >&2
+	    clean_exit 2
+	fi
+    fi
+
+    if check_uuid_presence; then
+	find /dev -type b \
+	    | while read dev; do
+		  uuid="$(blkid "$dev" | sed -nr 's#^.*[[:blank:]](PT)?UUID=\"([^\"]*)\".*$#\2#p')"
+		  if [[ -n "$uuid" ]]; then
+		      echo "$uuid $dev" >>"$WORKDIR/tmpfs/$UUID_FILE"
+		      if [[ $? -ne 0 ]]; then
+			  echo "$PROGNAME: cannot create file '$UUID_FILE'" >&2
+			  echo "$PNSPACES  in the directory '$WORKDIR/tmpfs' on the tmpfs filesystem" >&2
+			  clean_exit 2
+		      fi
+		  fi
+	      done
+    fi
+
+    return 0
+    
+}
+
+
+# get_uuid_device uuid
+#   print path to the device with the given uuid as specified in the uuid file,
+#   print nothing if no device with uuid found
+# return: 0 - ok
+get_uuid_device() {
+
+    local uuid="$1"
+
+    grep -i "^$uuid[[:blank:]]" "$WORKDIR/tmpfs/$UUID_FILE" \
+	| head -1 \
+	| sed -nr 's#^[^[:blank:]]+[[:blank:]]+([^[:blank:]]+)$#\1#p'
+
+    return 0
+}
+
+
+# mount_backup_fs
+#   mount the backup filesystem which may accessed locally as a standard
+#   block device or remotely as a sshfs filesystem, the local block
+#   device may optionally be encrypted using LUKS
+# return: 0 - ok
+#         1 - the remote sshfs backup filesystem not mounted
+#         2 - the local backup device not found
+#         3 - the local backup device not decrypted
+#         4 - the local backup filesystem not mounted
+mount_backup_fs() {
+
+    local uuid device dmdev
+    local cryptsetup_ec
+
+    # mount the backup filesystem remotely via sshfs or locally as a device
+    if echo "$DEV" | grep -q ':'; then
+
+	# mount the remote backup filesystem via sshfs
+	sshfs -o ssh_command='ssh -A' "$DEV" "$MNTDIR"
+	if [[ $? -eq 0 ]]; then
+	    add_exit_cmd umount_backup_fs
+	else
+	    echo "$PROGNAME: cannot mount the remote backup filesystem via sshfs"
+	    return 1
+	fi
+	
+    else
+
+	# find the path to the backup device (can be specified by uuid)
+	if echo "${DEV:0:5}" | grep -qi '^UUID=$'; then
+	    uuid="$(echo "$DEV" | sed -r 's#^....=##')"
+	    device="$(get_uuid_device "$uuid")"
+	else
+	    device="/dev/$DEV"
+	fi
+
+	if [[ -z "$device" || ! -b "$device" ]]; then
+	    echo "$PROGNAME: backup device not found" >&2
+	    return 2
+	fi
+
+	# decrypt the backup device
+	if [[ -n "$DM" ]]; then
+	    if [[ -n "$TAR_LVM_ONE_PASSWORD" ]]; then
+		echo -n \
+		    | awk 'BEGIN {printf("%s\n", ENVIRON["TAR_LVM_ONE_PASSWORD"]);}' \
+		    | cryptsetup luksOpen "$device" "$DM"
+		cryptsetup_ec="$?"
+	    else
+		cryptsetup luksOpen "$device" "$DM"
+		cryptsetup_ec="$?"
+	    fi
+	    if [[ "$cryptsetup_ec" -ne 0 ]]; then	
+		echo "$PROGNAME: cannot decrypt the backup device" >&2
+		return 3
+	    fi
+	fi
+
+	# mount the local backup filesystem as a device
+	if [[ -n "$DM" ]]; then
+            dmdev="/dev/mapper/$DM"
+	else
+            dmdev="$device"
+	fi
+	mount "$dmdev" "$MNTDIR"
+	if [[ $? -eq 0 ]]; then
+	    add_exit_cmd umount_backup_fs
+	else	   
+            echo "$PROGNAME: cannot mount the backup filesystem" >&2
+	    [[ -n "$DM" ]] && umount_backup_fs 'close'
+	    return 4
+	fi
+
+    fi
+
+    # return
+    return 0
+    
+}
+
+
+# umount_backup_fs [close_only]
+#   unmount the backup filesystem which may be remotely mounted via sshfs
+#   or just locally as a standard device, the local backup device
+#   is closed as well if encrypted or optionally just closed (not unmounted)
+#   if encrypted and close_only is not empty (the close_only argument
+#   has no effect if backup device is configured as sshfs target)
+# return: 0 - ok
+#         1 - the remote backup filesystem not unmounted via sshfs
+#         2 - the local backup filesystem not unmounted properly
+#         3 - the encrypted local backup device not closed
+umount_backup_fs() {
+
+    local close_only="$1"
+    
+    # unmount the backup filesystem
+    if echo "$DEV" | grep -q ':'; then
+
+	# unmount the remote backup filesystem
+	if grep -Eq "^[^[:blank:]]+[[:blank:]]+$MNTDIR" /proc/mounts; then
+	    fusermount -u "$MNTDIR"
+	    if [[ $? -ne 0 ]]; then
+		echo "$PROGNAME: cannot unmount the remote backup filesystem via sshfs"
+		return 1
+	    fi
+	fi
+	
+    else
+
+	# unmount the local backup filesystem
+	if [[ -z "$close_only" ]]; then
+	    if grep -Eq "^[^[:blank:]]+[[:blank:]]+$MNTDIR" /proc/mounts; then
+		umount "$MNTDIR"
+		if [[ $? -ne 0 ]]; then
+		    echo "$PROGNAME: cannot unmount the backup filesystem" >&2
+		    return 1
+		fi
+	    fi
+	fi
+
+	# close the unencrypted device
+	if [[ -n "$DM" ]]; then
+	    if [[ -b "/dev/mapper/$DM" ]]; then
+		cryptsetup luksClose "$DM" 
+		if [[ $? -ne 0 ]]; then
+		    echo "$PROGNAME: cannot close the device mapper backup filesystem" >&2
+		    return 2
+		fi
+	    fi
+	fi
+
+    fi
+
+    # return
+    return 0
+
+}
+
+
+# check()
+#   check that the backup of the specified level is allright, i.e. that
+#   all tar-lvm logs of this or lower level exist, that the result
+#   in these logs is OK and that the timestamps in tar-lvm pre, run and post
+#   logs are increasing for each level, the same check is done
+#   for the tar-lvm-one logs
+# return: 0 - ok or clean exit in progress
+#         1 - some of the backups isn't ok
+check() {
+
+    [[ "$CE_RUNNING" = 0 ]] && return 0
+
+    local ec=0
+    local i mode_log mode log ts
+    local ts_pre1 ts_pre2 ts_run1 ts_run2 ts_post1 ts_post2
+    local tl2ts_pre tl2ts_run tl2ts_post
+    local allrun log_run log_all
+    
+    # run tar-lvm check for the specified level
+    tar-lvm check "$ARG_LEVEL" "$OUTDIR"
+    [[ $? -ne 0 ]] && ec=1
+
+    # check all levels lower or equal to the specified level
+    for ((i=0; i<=ARG_LEVEL; i++)); do
+
+	# check that tar-lvm logs exist, their results and timestamps
+	tl2ts_pre=1
+	tl2ts_run=1
+	tl2ts_post=1
+
+	for mode_log in "pre:$LOGDIR/tar-lvm_pre.$i.log" "run:$LOGDIR/tar-lvm_run.$i.log" "post:$LOGDIR/tar-lvm_post.$i.log"; do
+
+	    mode="$(echo "$mode_log" | cut -d: -f1)"
+	    log="$(echo "$mode_log" | cut -d: -f2-)"
+
+	    if [[ ! -f "$log" || ! -r "$log" ]]; then
+		echo "$PROGNAME: 'tar-lvm $mode $i' log for level '$i' missing or not readable," >&2
+		echo "$PNSPACES  no '$log'" >&2
+		ec=1	    
+	    else
+		grep -Eq '^tar-lvm:[[:blank:]]+result[[:blank:]]*=>[[:blank:]]*OK[[:blank:]]*$' "$log"
+		if [[ $? -ne 0 ]]; then
+		    echo "$PROGNAME: 'tar-lvm $mode $i' failed, see log" >&2
+		    echo "$PNSPACES  '$log'" >&2
+		    ec=1
+		else
+
+		    ts="$(sed -rn 's#^tar-lvm:([[:blank:]]+[[:digit:]]+-[[:digit:]]+-[[:digit:]]+[[:blank:]]+[[:digit:]]+:[[:digit:]]+:[[:digit:]]+.*)$#\1#p' "$log")"
+
+		    eval tl2ts_$mode=0
+		    if [[ "$(echo "$ts" | wc -l)" -ne 2 ]]; then
+			echo "$PROGNAME: 'tar-lvm $mode $i' log doesn't contain two timestamps," >&2
+			echo "$PNSPACES  i.e. the start and stop timestamp, see the log" >&2
+			echo "$PNSPACES  '$log'" >&2
+			ec=1	    
+			eval tl2ts_$mode=1
+		    fi
+
+		    case "$mode" in
+			'pre')
+			    if [[ "$tl2ts_pre" = 0 ]]; then
+				ts_pre1="$(date -d "$(echo "$ts" | head -1)" '+%s')"
+				ts_pre2="$(date -d "$(echo "$ts" | tail -1)" '+%s')"
+			    fi
+			    ;;
+			'run')
+			    if [[ "$tl2ts_run" = 0 ]]; then
+				ts_run1="$(date -d "$(echo "$ts" | head -1)" '+%s')"
+				ts_run2="$(date -d "$(echo "$ts" | tail -1)" '+%s')"
+			    fi
+			    ;;
+			'post')
+			    if [[ "$tl2ts_post" = 0 ]]; then
+				ts_post1="$(date -d "$(echo "$ts" | head -1)" '+%s')"
+				ts_post2="$(date -d "$(echo "$ts" | tail -1)" '+%s')"
+			    fi
+			    ;;
+		    esac
+		
+		fi
+
+	    fi	    
+
+	done
+
+	# check timestamps in the tar-lvm logs
+	if [[ "$tl2ts_pre" = 0 && "$ts_pre1" -gt "$ts_pre2" ]]; then
+	    echo "$PROGNAME: 'tar-lvm pre $i' start time is greater than its stop time" >&2
+	    ec=1
+	fi
+
+	if [[ "$tl2ts_pre" = 0 && "$tl2ts_run" = 0 && "$ts_pre2" -gt "$ts_run1" ]]; then
+	    echo "$PROGNAME: 'tar-lvm pre $i' stop time is greater than 'tar-lvm run $i'" >&2
+	    echo "$PNSPACES  start time" >&2
+	    ec=1
+	fi
+
+	if [[ "$tl2ts_run" = 0 && "$ts_run1" -gt "$ts_run2" ]]; then
+	    echo "$PROGNAME: 'tar-lvm run $i' start time is greater than its stop time"
+	    ec=1
+	fi
+
+	if [[ "$tl2ts_run" = 0 && "$tl2ts_post" = 0 && "$ts_run2" -gt "$ts_post1" ]]; then
+	    echo "$PROGNAME: 'tar-lvm run $i' stop time is greater than 'tar-lvm post $i'" >&2
+	    echo "$PNSPACES  start time" >&2
+	    ec=1
+	fi
+
+	if [[ "$tl2ts_post" = 0 && "$ts_post1" -gt "$ts_post2" ]]; then
+	    echo "$PROGNAME: 'tar-lvm post $i' start time is greater than its stop time" >&2
+	    ec=1
+	fi
+
+	# check that tar-lvm-one logs exist, their results and timestamps,
+	# firstly all or run logs (only one of them can exist)
+	tl2ts_pre=1
+	tl2ts_run=1
+	tl2ts_post=1	    
+
+	log_all="$LOGDIR/${PROGNAME}_all.$i.log"
+	log_run="$LOGDIR/${PROGNAME}_run.$i.log"
+	allrun='all' && mode="$allrun" && log="$log_all"
+	[[ ! -f "$log" || ! -r "$log" ]] \
+	    && allrun='run' && mode="$allrun" && log="$log_run"
+	if [[ ! -f "$log" || ! -r "$log" ]]; then
+		echo "$PROGNAME: both '$PROGNAME all $i' and '$PROGNAME run $i' logs" >&2
+		echo "$PNSPACES  are missing or not readable, neither" >&2	
+		echo "$PNSPACES  '$log_all'" >&2
+		echo "$PNSPACES  nor '$log_run'" >&2
+	else
+	    grep -Eq "^$PROGNAME:[[:blank:]]+result[[:blank:]]*=>[[:blank:]]*OK[[:blank:]]*\$" "$log"
+	    if [[ $? -ne 0 ]]; then
+		echo "$PROGNAME: '$PROGNAME $mode $i' failed, see log" >&2
+		echo "$PNSPACES  '$log'" >&2
+		ec=1
+	    else
+
+		# check timestamps in the tar-lvm-one all/run log
+		ts="$(sed -rn "s#^$PROGNAME:([[:blank:]]+[[:digit:]]+-[[:digit:]]+-[[:digit:]]+[[:blank:]]+[[:digit:]]+:[[:digit:]]+:[[:digit:]]+.*)\$#\1#p" "$log")"
+
+		tl2ts_run=0
+		if [[ "$(echo "$ts" | wc -l)" -ne 2 ]]; then
+		    echo "$PROGNAME: '$PROGNAME $mode $i' log doesn't contain two timestamps," >&2
+		    echo "$PNSPACES  i.e. the start and stop timestamp, see the log" >&2
+		    echo "$PNSPACES  '$log'" >&2	    
+		    ec=1
+		    tl2ts_run=1
+		fi
+
+		if [[ "$tl2ts_run" = 0 ]]; then
+		    ts_run1="$(date -d "$(echo "$ts" | head -1)" '+%s')"
+		    ts_run2="$(date -d "$(echo "$ts" | tail -1)" '+%s')"
+		fi
+
+	    fi
+
+	    # check pre and post logs in the run mode as well
+	    if [[ "$allrun" = 'run' ]]; then
+
+		for mode_log in "pre:$LOGDIR/${PROGNAME}_pre.$i.log" "post:$LOGDIR/${PROGNAME}_post.$i.log"; do
+
+		    mode="$(echo "$mode_log" | cut -d: -f1)"
+		    log="$(echo "$mode_log" | cut -d: -f2-)"
+		
+		    if [[ ! -f "$log" || ! -r "$log" ]]; then
+			echo "$PROGNAME: '$PROGNAME $mode $i' log for level '$i' missing or not readable," >&2
+			echo "$PNSPACES  no '$log'" >&2
+		    else
+			grep -Eq "^$PROGNAME:[[:blank:]]+result[[:blank:]]*=>[[:blank:]]*OK[[:blank:]]*\$" "$log"
+			if [[ $? -ne 0 ]]; then
+			    echo "$PROGNAME: '$PROGNAME $mode $i' failed, see log" >&2
+			    echo "$PNSPACES  '$log'" >&2
+			    ec=1
+			else
+
+			    # check timestamps in the tar-lvm-one pre/post log
+			    ts="$(sed -rn "s#^$PROGNAME:([[:blank:]]+[[:digit:]]+-[[:digit:]]+-[[:digit:]]+[[:blank:]]+[[:digit:]]+:[[:digit:]]+:[[:digit:]]+.*)\$#\1#p" "$log")"
+		    
+			    eval tl2ts_$mode=0
+			    if [[ "$(echo "$ts" | wc -l)" -ne 2 ]]; then
+				echo "$PROGNAME: '$PROGNAME $mode $i' log doesn't contain two timestamps," >&2
+				echo "$PNSPACES  i.e. the start and stop timestamp, see the log" >&2
+				echo "$PNSPACES  '$log'" >&2
+				ec=1
+				eval tl2ts_$mode=1
+			    fi
+
+			    case "$mode" in
+				'pre')
+				    if [[ "$tl2ts_pre" = 0 ]]; then
+					ts_pre1="$(date -d "$(echo "$ts" | head -1)" '+%s')"
+					ts_pre2="$(date -d "$(echo "$ts" | tail -1)" '+%s')"
+				    fi
+				    ;;
+				'post')
+				    if [[ "$tl2ts_post" = 0 ]]; then
+					ts_post1="$(date -d "$(echo "$ts" | head -1)" '+%s')"
+					ts_post2="$(date -d "$(echo "$ts" | tail -1)" '+%s')"
+				    fi
+				    ;;
+			    esac
+
+			fi	
+
+		    fi
+
+		done
+
+	    fi
+
+	    # check timestamps in the tar-lvm-one logs
+	    if [[ "$tl2ts_pre" = 0 && "$ts_pre1" -gt "$ts_pre2" ]]; then
+		echo "$PROGNAME: '$PROGNAME pre $i' start time is greater than its stop time" >&2
+		ec=1
+	    fi
+
+	    if [[ "$tl2ts_pre" = 0 && "$tl2ts_run" = 0 && "$ts_pre2" -gt "$ts_run1" ]]; then
+		echo "$PROGNAME: '$PROGNAME pre $i' stop time is greater than '$PROGNAME run $i'" >&2
+		echo "$PNSPACES  start time" >&2
+		ec=1
+	    fi
+
+	    if [[ "$tl2ts_run" = 0 && "$ts_run1" -gt "$ts_run2" ]]; then
+		echo "$PROGNAME: '$PROGNAME run $i' start time is greater than its stop time" >&2
+		ec=1
+	    fi
+
+	    if [[ "$tl2ts_run" = 0 && "$tl2ts_post" = 0 && "$ts_run2" -gt "$ts_post1" ]]; then
+		echo "$PROGNAME: '$PROGNAME run $i' stop time is greater than '$PROGNAME post $i'" >&2
+		echo "$PNSPACES  start time" >&2
+		ec=1
+	    fi
+
+	    if [[ "$tl2ts_post" = 0 && "$ts_post1" -gt "$ts_post2" ]]; then
+		echo "$PROGNAME: '$PROGNAME post $i' start time is greater than its stop time" >&2
+		ec=1
+	    fi
+
+	fi
+		
+    done
+
+    return "$ec"
+    
+}
+
+
+# get_timestamp
+#   print timestamp in the RFC-3339 format
+# return:
+#   0 - ok
+get_timestamp() {
+
+    echo -n "$PROGNAME: "
+    date --rfc-3339=seconds
+
+    return 0
+    
+}
+
+
+# check_subsequent_backups()
+#   check that no backups of the same or higher level than the current level
+#   exist, if so either exit (default) or delete those backups (-f switch
+#   given)
+# return: exit - some backups of the same or higher level exist (default)
+#                or cannot be deleted (-f switch given)
+#         0 - ok or clean exit in progress
+check_subsequent_backups() {
+
+    [[ "$CE_RUNNING" = 0 ]] && return 0
+
+    local f flevel
+    local fstrun=0 delnum
+
+    [[ "$ARG_F" = 'y' ]] \
+	&& echo "$PROGNAME: deleting the following backup archives"
+
+    delnum=0
+    for f in \
+	$(ls -1 "$BKPDIR" \
+	| grep -E '^.*[.][0-9]+[.](tgz|snar)$')
+    do
+
+	flevel=$(echo "$f" | sed -nr 's#^.*[.]([0-9]+)[.][a-z]+$#\1#p')
+	if [[ "$flevel" -ge "$ARG_LEVEL" ]]; then
+
+	    if [[ "$ARG_F" != 'y' ]]; then
+
+		if [[ "$fstrun" = 0 ]]; then
+		    echo "$PROGNAME: the following backups of the same or higher level than $ARG_LEVEL already" >&2
+		    echo "$PNSPACES  exist in the directory '$BKPDIR',"
+		    echo "$PNSPACES  either increase the backup level or use the -f switch to delete" >&2
+		    echo "$PNSPACES  those archives" >&2
+		    fstrun=1
+		fi
+		echo "  '$f'" >&2
+
+	    else
+
+		echo "  '$f'"
+		rm -f "$BKPDIR/$f"
+		if [[ "$?" -eq 0 ]]; then
+		    delnum="$((delnum+1))"
+		else
+		    echo "$PROGNAME: cannot delete '$BKPDIR/$f'" >&2
+		    fstrun=1
+		fi
+
+	    fi
+
+	fi
+
+    done
+
+    [[ "$ARG_F" = 'y' ]] \
+	&& echo "$PROGNAME: $delnum backup archive(s) deleted"
+
+    [[ "$fstrun" != 0 ]] && clean_exit 4
+    return 0
+    
+}
+
+
+# delete_subsequent_logs() [errfd]
+#   delete the logs of the same or higher level than the current level
+#   depending on the specified mode, delete just the logs created directly
+#   by tar-lvm-one, log potential errors that do not belong to the log file
+#   to the errfd file descriptor (default 2)
+# return: exit - some logs of the same or higher level than the current level
+#                cannot be deleted
+#         0 - ok or clean exit in progress
+delete_subsequent_logs() {
+
+    [[ "$CE_RUNNING" = 0 ]] && return 0
+
+    local errfd="${1:-2}"
+
+    local f flevel
+    local cntrun=0 delnum
+    local nameorlst pre_nameorlst
+
+    echo "$PROGNAME: deleting the following logs"
+
+    nameorlst="${PROGNAME}_all|${PROGNAME}_pre|${PROGNAME}_run|${PROGNAME}_post|ssd-backup_stop|tar-lvm_pre|ssd-backup_start|tar-lvm_run|tar-lvm_post|df|tar[.].*"
+    pre_nameorlst="${PROGNAME}_pre|ssd-backup_stop|tar-lvm_pre|ssd-backup_start"
+    case "$ARG_MODE" in
+	'pre')
+	    nameorlst="$pre_nameorlst"
+	    ;;
+	'post')
+	    nameorlst="${PROGNAME}_post|tar-lvm_post"
+	    ;;
+    esac
+    
+    delnum=0
+    for f in \
+	$(ls -1 "$LOGDIR" \
+	| grep -E '^('"$nameorlst"')[.][0-9]+[.]log$')
+    do
+	flevel=$(echo "$f" | sed -nr 's#^.*[.]([0-9]+)[.][a-z]+$#\1#p')
+	if [[ "$flevel" -ge "$ARG_LEVEL" ]]; then
+
+	    echo "$f" | grep -q "^${PROGNAME}_$ARG_MODE" \
+		&& [[ "$flevel" -eq "$ARG_LEVEL" ]] \
+		&& continue
+
+	    if [[ "$ARG_MODE" = 'run' ]]; then
+		echo "$f" | grep -Eq '^('"$pre_nameorlst"')[.][0-9]+[.]log$' \
+		    && continue
+	    fi
+
+	    echo "  '$f'"
+
+	    rm -f "$LOGDIR/$f"
+	    if [[ "$?" -eq 0 ]]; then
+		delnum="$((delnum+1))"
+	    else
+		echo "$PROGNAME: cannot delete '$LOGDIR/$f'" >&"$errfd"
+		cntrun=1
+	    fi
+
+	fi
+    done
+
+    echo "$PROGNAME: $delnum log(s) deleted"
+
+    [[ "$cntrun" != 0 ]] && clean_exit 4
+    return 0
+    
+}
+
+
+# pre() [errfd]
+#   stop all specified processes, remount all filesystems to backup read-only,
+#   create lvm snaphots, remount lvm filesystems read/write, start all
+#   specified processes if not deferred, log potential errors that do not
+#   belong to the log file to the errfd file descriptor (default 2)
+# return: 0 - ok
+#         1 - cannot stop processes, remount or create lvm snapshots or start
+#             processes
+pre() {
+
+    local errfd="${1:-2}"
+
+    # failure flag, either empty, STOP, PRE or START
+    local fail=''
+
+    local nologin=''
+    local ec=0
+
+    # check if /var/run/nologin exists
+    [[ -f '/var/run/nologin' ]] && nologin='y'
+
+    # stop daemons and some processes before the backup
+    ssd-backup -u -v stop >"$LOGDIR/ssd-backup_stop.$ARG_LEVEL.log" 2>&1
+    if [[ $? -ne 0 ]]; then
+	echo "$PROGNAME: ssd-backup failed during the stop phase," >&"$errfd"
+	echo "$PNSPACES  not all required processes stopped" >&"$errfd"
+	fail='STOP'
+    fi
+
+    # create lvm snaphots and remount read/write non-lvm filesystems read-only
+    if [[ -z "$fail" ]]; then
+	tar-lvm -v pre >"$LOGDIR/tar-lvm_pre.$ARG_LEVEL.log" 2>&1
+	if [[ $? -ne 0 ]]; then
+	    echo "$PROGNAME: tar-lvm failed during the pre phase" >&"$errfd"
+	    fail='PRE'
+	fi
+    fi
+
+    # start daemons if not deferred
+    if [[ "$DEFERSSDSTART" != 'true' ]]; then
+	ssd-backup -u -v start >"$LOGDIR/ssd-backup_start.$ARG_LEVEL.log" 2>&1
+	if [[ $? -ne 0 ]]; then
+	    echo "$PROGNAME: ssd-backup failed during the start phase," >&"$errfd"
+	    echo "$PNSPACES  not all required processes started" >&"$errfd"
+	    fail='START'
+	fi
+    fi
+
+    # restore /var/run/nologin if it was originally present
+    [[ -n "$nologin" ]] && touch '/var/run/nologin'
+
+    # return
+    [[ -n "$fail" ]] && ec=1
+    return "$ec"
+    
+}
+
+
+# run() [errfd]
+#   run the backup by invoking tar-lvm, log potential errors that do not
+#   belong to the log file to the errfd file descriptor (default 2)
+# return: 0 - ok
+#         1 - cannot find backup device, decrypt, mount, backup, unmount
+#             or encrypt
+run() {
+
+    local errfd="${1:-2}"
+
+    # failure flag, either empty or BKP
+    local fail=''
+    local ec=0
+
+    local tar_lvm_f=''
+
+    # run the backup
+    if [[ -z "$fail" ]]; then
+	[[ "$ARG_F" = 'y' ]] && tar_lvm_f='-f'
+
+	tar-lvm -v $tar_lvm_f run "$ARG_LEVEL" "$OUTDIR" >"$LOGDIR/tar-lvm_run.$ARG_LEVEL.log" 2>&1
+	if [[ $? -ne 0 ]]; then
+            echo "$PROGNAME: tar-lvm failed during the run phase" >&"$errfd"
+            fail='BKP'
+	fi
+    fi
+
+
+    # return
+    [[ -n "$fail" ]] && ec=1
+    return "$ec"
+    
+}
+
+
+# post() [errfd]
+#   remove lvm snaphots created during the pre phase and remount those non-lvm
+#   filesystems that were originally mounted read/write back read-write and
+#   start all specified processed it their start was deferred,
+#   log potential errors that do not belong to the log file to the errfd file
+#   descriptor (default 2)
+# return: 0 - ok
+#         1 - cannot remove lvm snapshots or remount non-lvm filesystems back
+#             read/write
+post() {
+
+    local errfd="${1:-2}"
+    
+    # failure flag, either empty or POST
+    local fail=''
+    local ec=0
+
+    # remove the lvm snapshots and remount non-lvm filesystems back read-write
+    # (those that were originally mounted read/write)
+    tar-lvm -v post >"$LOGDIR/tar-lvm_post.$ARG_LEVEL.log" 2>&1
+    if [[ $? -ne 0 ]]; then
+	echo "$PROGNAME: tar-lvm failed during the post phase" >&"$errfd"
+	fail='POST'
+    fi
+
+    # start daemons if deferred
+    if [[ "$DEFERSSDSTART" = 'true' ]]; then
+	ssd-backup -u -v start >"$LOGDIR/ssd-backup_start.$ARG_LEVEL.log" 2>&1
+	if [[ $? -ne 0 ]]; then
+	    echo "$PROGNAME: ssd-backup failed during the start phase," >&"$errfd"
+	    echo "$PNSPACES  not all required processes started" >&"$errfd"
+	    fail='START'
+	fi
+    fi
+
+    # return
+    [[ -n "$fail" ]] && ec=1
+    return "$ec"
+    
+}
+
+
+# all() [errfd]
+#   run pre, run and post actions in this order, log potential errors that
+#   do not belong to the log file to the errfd file descriptor (default 2)
+# return: 0 - ok
+#         1 - pre, run or post action failed
+all() {
+
+    local errfd="${1:-2}"
+
+    # failure flag, either empty, PRE, RUN or POST
+    local fail=''
+    local ec=0
+
+    # pre
+    pre "$errfd"
+    [[ $? -ne 0 ]] && fail='PRE'
+
+    # run
+    if [[ -z "$fail" ]]; then
+	run "$errfd"
+	[[ $? -ne 0 ]] && fail='RUN'
+    fi
+
+    # post
+    post "$errfd"
+    [[ $? -ne 0 ]] && fail='POST'
+
+    # return
+    [[ -n "$fail" ]] && ec=1
+    return "$ec"
+    
+}
+
+
+# clean()
+#   perform cleanup, i.e. run tar-lvm clean and unmount tmpfs filesystem
+#   if mounted
+# return: 0 - ok
+#         1 - tar-lvm, ssd-backup, or umount of backup fs or tmpfs failed
+clean() {    
+
+    local ec=0
+
+    # run tar-lvm cleanup at first
+    tar-lvm -v clean
+    [[ "$?" -ne 0 ]] && ec=1
+
+    # then continue with ssd-backup clean
+    ssd-backup -v clean
+    [[ "$?" -ne 0 ]] && ec=1
+
+    # try to unmount the backup filesystem
+    echo "$PROGNAME: unmounting backup filesystem"
+    umount_backup_fs
+    [[ "$?" -ne 0 ]] && ec=1
+
+    # unmount tmpfs filesystem if mounted
+    echo "$PROGNAME: unmounting tmpfs filesystem"
+    umount_tmpfs
+    [[ "$?" -ne 0 ]] && ec=1
+
+    return "$ec"
+    
+}
+
+
+###### MAIN ###################################################################
+
+### check tools, parse and check arguments, run initialization
+
+# check if all the external tools are available on the system
+check_tools grep id sed ps cat rm mount umount true scp mkdir find \
+	    head awk tar-lvm cut wc date tail ls ssd-backup touch
+
+# parse and check arguments
+parse_args "$@"
+check_args
+
+[[ "$ARG_MODE" = 'help' ]] && usage
+
+# check if the script is called by root
+check_root_id
+
+# check if the script is not running yet
+check_if_running
+
+# check working directory
+check_work_dir
+
+# check that readable /proc/mounts exists
+check_proc_mounts
+
+# mount the tmpfs filesystem which is always read/write
+mount_tmpfs "$TMPFS_SIZE"
+
+# get shared configuration file if requested, read the configuration files
+# and check configuration
+get_read_check_config "$CONFFILE_LOCAL" "$CONFFILE_SHARED"
+
+OUTDIR="$MNTDIR/$ROOTDIR/$(hostname -s)"
+LOGDIR="$OUTDIR/log"
+BKPDIR="$OUTDIR/cache"
+
+# perform cleanup if requested
+if [[ "$ARG_MODE" = 'clean' ]]; then
+    clean
+    EC="$?"
+    
+    clean_exit "$EC"
+fi
+
+# create file which maps uuids to device names
+create_uuid_file
+
+# check add-on tools presence
+check_addon_tools
+
+
+# mount backup filesystem
+mount_backup_fs
+mount_backup_fs_ec="$?"
+[[ "$mount_backup_fs_ec" -ne 0 ]] && clean_exit 3    
+
+# check output directory
+check_outdir
+
+# perform check if requested
+if [[ "$ARG_MODE" = 'check' ]]; then
+    check
+    EC="$?"
+    
+    clean_exit "$EC"
+fi
+
+# delete main log file
+rm -f "$LOGDIR/${PROGNAME}_$ARG_MODE.$ARG_LEVEL.log"
+if [[ "$?" -ne 0 ]]; then
+    echo "$PROGNAME: cannot delete '$LOGDIR/${PROGNAME}_$ARG_MODE.$ARG_LEVEL.log'" >&2
+    clean_exit 4
+fi
+
+
+# main functionality
+exec 3>&2
+(
+
+    # delete items from the exit commands array in this subshell, i.e.
+    # perform cleanup just for the exit commands added in this subshell
+    unset EXIT_CMDS
+
+    # print timestamp(s)
+    get_timestamp
+    add_exit_cmd 'print_result'
+    add_exit_cmd 'get_timestamp'
+    
+    # check that no backups of the same or higher level exist in the run
+    # or all mode and optionally delete them 
+    [[ "$ARG_MODE" = 'run' || "$ARG_MODE" = 'all' ]] \
+	&& check_subsequent_backups
+
+    # delete the backup logs of the same or higher level than ARG_LEVEL
+    delete_subsequent_logs 3
+
+    # either pre, run or post phase or all (pre, run and post in this order)
+    "$ARG_MODE" 3
+    [[ "$?" -ne 0 ]] && clean_exit 4
+
+    # invoke all exit commands added in this subshell
+    RESULT='OK'
+    clean_exit 0
+
+) >"$LOGDIR/${PROGNAME}_$ARG_MODE.$ARG_LEVEL.log" 2>&1
+EC="$?"
+exec 3>&-
+
+
+### invoke all remaining exit commands and exit
+if [[ "$EC" != 0 ]]; then
+    echo "$PROGNAME: $PROGNAME error occured, see log" >&2
+    echo "$PNSPACES  '$LOGDIR/${PROGNAME}_$ARG_MODE.$ARG_LEVEL.log'" >&2
+fi
+
+[[ "$EC" = 0 ]] && RESULT='OK'
+clean_exit "$EC"

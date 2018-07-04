@@ -1,0 +1,1501 @@
+#!/bin/bash
+
+###############################################################################
+#
+# script: tar-lvm-all
+# author: Lukas Baxa alias Baxic <baxic-cs@seznam.cz>
+#
+# This script is free software; you can redistribute it and/or modify it
+# under the terms of the GNU General Public License as published by the
+# Free Software Foundation; either version 3, or (at your option) any later
+# version.
+#
+###############################################################################
+
+
+# set program name
+PROGNAME='tar-lvm-all'
+PNSPACES='           '
+
+# set versions
+SCRIPT_VERSION='00.21'
+SUITE_VERSION='00.80'
+
+# set configuration directories and files
+CONFDIR='/usr/local/etc/tar-lvm'
+WORKDIR='/var/local/tar-lvm'
+CONFFILE="$PROGNAME.conf"
+CONFFILE_ONE_LOCAL='tar-lvm-one.local.conf'
+CONFFILE_ONE_SHARED='tar-lvm-one.shared.conf'
+DEVDEFFILE='virtio-pmdev-to-vmdev.xml'
+
+# set uuid filename
+UUID_FILE="uuid.list.$PROGNAME"
+
+# set tmpfs size in bytes, period in seconds to check each machine/host
+# if tar-lvm-one is still running on it, delay period in seconds to wait
+# after pm backup (so that vms on it get ready) and number of ssh
+#  retries/failures when checking if tar-lvm-one is still running
+# (i.e. how many consecutive failures cause the host to be considered
+#  inactive/dead)
+TMPFS_SIZE="$((20*1024*1024))"
+VMCHECK_PERIOD=10
+POSTPM_DELAY=40
+SSHCHECK_RETRIES=3
+
+# exit commands array and clean exit running flag
+unset EXIT_CMDS
+CE_RUNNING=1
+
+
+# unset global variables defined after reading the configuration file, i.e.
+# name of the backup device on the physical and virtual host, passprompt
+# flag, physical machine backup flag, names of virtual machines/hosts
+# to backup, hosts to backup, number of hosts to backup in parallel,
+# mailto, smtpserver and mailfrom values (used to sending output by email)
+unset PMDEV
+unset VMDEV
+unset PASSPROMPT
+unset PMBACKUP
+unset VM
+unset HOST
+unset PARHOSTNUM
+unset MAILTO
+unset SMTPSERVER
+unset MAILFROM
+
+
+# check_tools() tool1 ... toolN
+#   check if all the external tools tool1 ... toolN and which are available
+#   on the system
+# return: exit - some of the tools are missing
+#         0 - ok
+check_tools() {
+
+    local fail fst
+    local tool
+
+    if ! which which >/dev/null 2>&1; then
+        echo "$PROGNAME: cannot find the 'which' command that is necessary" >&2
+        exit 1
+    fi
+
+    fail=1
+    fst=0
+    for tool in "$@"; do
+        if ! which "$tool" >/dev/null 2>&1; then
+            if [[ "$fst" = 0 ]]; then
+                echo "$PROGNAME: cannot find the following tools/commands that are necessary" >&2
+                fst=1
+            fi
+            echo "  '$tool'" >&2
+            fail=0
+        fi
+    done
+
+    [[ "$fail" = 0 ]] && exit 1
+    return 0
+    
+}
+
+
+# usage() [exit_code]
+#   print the usage info and exit with given exit code (default 0)
+# return: exit
+usage() {
+
+    local ec="${1:-0}"
+    if [[ "$ec" != 0 ]]; then
+        exec >&2
+    fi
+
+    echo "$PROGNAME - run tar-lvm-one on some virtual machines on one physical"
+    echo "$PNSPACES   machine (physical machine can be included) and on chosen"
+    echo "$PNSPACES   hosts via SSH"
+    echo
+    echo "    ($PROGNAME version: $SCRIPT_VERSION, tar-lvm suite version: $SUITE_VERSION)"    
+    echo
+    echo "usage: $PROGNAME -h | help"
+    echo "       $PROGNAME [-v] pre level"
+    echo "       $PROGNAME [-v] [-f] run level"
+    echo "       $PROGNAME [-v] post level"
+    echo "       $PROGNAME [-v] [-f] all level"
+    echo "       $PROGNAME check level"
+    echo "       $PROGNAME clean"
+    echo
+    echo '    -h ... print help and exit'
+    echo "    pre ... prepare all hosts for the backup, i.e. run 'tar-lvm-one pre'"
+    echo "            on each host"
+    echo "    run ... run the backup on each host, i.e. run 'tar-lvm-one run level'"
+    echo "    post ... finalize the backup on each host, i.e. run 'tar-lvm-one post'"
+    echo "             on each host"
+    echo "    all ... all phases, i.e. run 'tar-lvm-one all level' on each host"
+    echo '    check ... check the results of the backups of the specified level'
+    echo '              and of all preceding levels on all hosts'
+    echo "    clean ... perform cleanup on all hosts, i.e. run 'tar-lvm-one clean'"
+    echo '              on each host, then perform local cleanup'
+    echo '    level ... level of the incremental backup, i.e. non-negative integer'
+    echo '    -v ... print verbose info about hosts being processed'
+    echo '    -f ... force the backup, pass this argument to tar-lvm-one'
+    echo
+
+    exit "$ec"
+    
+}
+
+
+# parse_args() arg1 ... argN
+#   parse the command-line arguments and set the global variables ARG_MODE,
+#   ARG_LEVEL, ARG_V and ARG_F
+# return: exit - wrong arguments are given
+#         0 - ok
+parse_args() {
+
+    local arg
+
+    ARGNUM=0
+    ARG_MODE=''
+    ARG_LEVEL=''
+
+    ARG_V='n'
+    ARG_F='n'
+
+    for arg in "$@"; do
+        case "$arg" in
+            '-v' ) 
+                [[ "$ARG_V" = 'y' ]] && usage 1
+                ARG_V='y'
+                ;;
+            '-f' ) 
+                [[ "$ARG_F" = 'y' ]] && usage 1
+                ARG_F='y'
+                ;;
+            *)
+                if [[ "${arg:0:1}" = '-' \
+		    && ( "$arg" != '-h' || "$ARGNUM" -gt 0 ) ]]; then
+                    usage 1
+                else            
+                    ARGNUM="$((ARGNUM+1))"
+		    case "$ARGNUM" in
+			1)
+			    case "$arg" in
+				'-h' | 'help')
+				    ARG_MODE='help'
+				    ;;
+				'pre' | 'run' | 'post' | 'all' | 'clean' | 'check')
+				    ARG_MODE="$arg"
+				    ;;
+				*)
+				    usage 1
+				    ;;
+			    esac
+			    ;;
+			2)
+			    ARG_LEVEL="$arg"
+			    ;;
+		    esac
+                fi
+		;;
+        esac
+    done    
+
+    if [[ -z "$ARG_MODE" ]]; then
+        usage 1
+    elif [[ "$ARG_MODE" = 'help' ]]; then
+        [[ "$ARGNUM" -ne 1 || "$ARG_F" = 'y' || "$ARG_V" = 'y' ]] && usage 1
+    elif [[ "$ARG_MODE" = 'clean' ]]; then
+        [[ "$ARGNUM" -ne 1 || "$ARG_F" = 'y' || "$ARG_V" = 'y' ]] && usage 1
+    elif [[ "$ARG_MODE" = 'check' ]]; then
+        [[ "$ARGNUM" -ne 2 || "$ARG_F" = 'y' || "$ARG_V" = 'y' ]] && usage 1
+    elif [[ "$ARG_MODE" = 'pre' || "$ARG_MODE" = 'post'
+           || "$ARG_MODE" = 'run' || "$ARG_MODE" = 'all' ]]; then
+        [[ "$ARGNUM" -ne 2 ]] && usage 1
+    fi
+
+    return 0
+    
+}
+
+
+# check_args()
+#   check that the command-line arguments are correct, must be called after
+#   parse_args
+# return: exit - the arguments are not correct
+#         0 - ok
+check_args() {
+
+    if [[ "$ARG_MODE" = 'pre' || "$ARG_MODE" = 'run' || "$ARG_MODE" = 'post' ||
+		"$ARG_MODE" = 'all' || "$ARG_MODE" = 'check' ]]; then
+        if ! echo "$ARG_LEVEL" | grep -Eq '^[0-9]+$'; then
+            echo "$PROGNAME: level must be a non-negative integer" >&2
+            exit 1
+        fi
+    fi
+
+    return 0
+    
+}
+
+
+# add_exit_cmd exit_cmd
+#   add exit command to be invoked when clean_exit is invoked, the command
+#   is just one argument to be invoked via eval
+# return: 0 - ok
+add_exit_cmd() {
+
+    local cmd="$1"
+    local i
+
+    i="${#EXIT_CMDS[@]}"
+    EXIT_CMDS[i]="$cmd"
+
+    return 0;
+
+}
+
+
+# del_exit_cmd [exit_cmd_number]
+#   remove exit command to be invoked when clean_exit is invoked, the command
+#   number can be specified, if it is not, the last command is removed if any
+# return: 0 - ok
+del_exit_cmd() {
+
+    local i="$1"
+    local j
+
+    if [[ "${#EXIT_CMDS[@]}" -gt 0 ]]; then
+	
+	if [[ -z "$i" ]]; then
+	    j="$(( ${#EXIT_CMDS[@]} - 1 ))"
+	    unset EXIT_CMDS[j]
+	else
+	    EXIT_CMDS[i]=''
+	fi
+
+    fi
+    
+    return 0;
+
+}
+
+
+# run_exit_cmds
+#   invoke all registered exit commands in the opposite order in which they
+#   were registered, but do not actually exit, then remove all exit commands
+# return: 0 - ok
+#         1 - some exit command failed
+run_exit_cmds() {
+
+    local i n
+    local cmd
+    local eval_ec ec=0
+
+    n="${#EXIT_CMDS[@]}"
+    for ((i=n-1; i>=0; i--)); do
+
+	cmd="${EXIT_CMDS[i]}"
+	if [[ -n "$cmd" ]]; then
+	    eval "$cmd"
+	    eval_ec="$?"
+	fi
+
+	if [[ "$eval_ec" -ne 0 ]]; then
+	    ec=1
+	fi
+
+    done
+
+    unset EXIT_CMDS
+    
+    return "$ec"
+    
+}
+
+
+# clean_exit [ec]
+#   exit cleanly, i.e. invoke all registered exit commands before exiting
+#   in the opposite order in which they were registered, the exit commands
+#   can be (de)registered by using add_exit_cmd/del_exit_cmd, finally,
+#   exit with the given exit code or with 1 if no exit code is given
+#   and some command fails
+# return: exit
+clean_exit() {
+
+    local ec_orig="${1:-0}"
+    local i n
+    local cmd
+    local ec=0
+
+    CE_RUNNING=0
+
+    run_exit_cmds
+    [[ "$?" -ne 0 ]] && ec=1
+    
+    [[ "$ec_orig" = 0 && "$ec" != 0 ]] && ec_orig="$ec"
+    exit "$ec_orig"
+
+}
+
+
+# check_root_id()
+#   check that the command is called by root
+# return: exit - the command is not called by root
+#         0 - ok or clean exit in progress
+check_root_id() {
+
+    [[ "$CE_RUNNING" = 0 ]] && return 0
+
+    if [[ $(id -u) != 0 ]]; then
+        echo "$PROGNAME: you must be root in order to use this script" >&2
+        clean_exit 2
+    fi
+
+    return 0
+    
+}
+
+
+# check_if_running()
+#   check that this script is not running yet
+# return: exit - the script is already running
+#         0 - ok
+check_if_running() {
+
+    if [[ -f "/var/run/$PROGNAME.pid" ]]; then
+
+	if [[ "$(ps -p "$(cat "/var/run/$PROGNAME.pid")" -o 'comm=')" = "$PROGNAME" ]]; then
+
+            echo "$PROGNAME: $PROGNAME already running" >&2
+            clean_exit 2
+	    
+	else
+
+	    rm -f "/var/run/$PROGNAME.pid"
+	    
+	fi
+
+    fi
+
+    echo "$$" >"/var/run/$PROGNAME.pid"
+    [[ "$?" -eq 0 ]] && add_exit_cmd "rm -f '/var/run/$PROGNAME.pid'"
+
+    return 0
+    
+}
+
+
+# check_work_dir
+#   check that the working directory exists and contains the subdirectories
+#   tmp and tmpfs with read/write permissions
+# return: exit - the configuration directory isn't all right
+#         0 - ok or clean exit in progress
+check_work_dir() {
+
+    [[ "$CE_RUNNING" = 0 ]] && return 0
+
+    if [[ ! -d "$WORKDIR/tmp" || ! -r "$WORKDIR/tmp" \
+        || ! -w "$WORKDIR/tmp" ]]; then
+        echo "$PROGNAME: the directory '$WORKDIR/tmp' doesn't exist," >&2
+        echo "$PNSPACES  isn't readable or writable" >&2
+	clean_exit 2
+    fi
+
+    if [[ ! -d "$WORKDIR/tmpfs" || ! -r "$WORKDIR/tmpfs" \
+        || ! -w "$WORKDIR/tmpfs" ]]; then
+        echo "$PROGNAME: the directory '$WORKDIR/tmpfs' doesn't exist," >&2
+        echo "$PNSPACES  isn't readable or writable" >&2
+	clean_exit 2
+    fi
+
+    return 0
+    
+}
+
+
+# mount_tmpfs() size
+#   mount the tmpfs filesystem to the directory mntdir if not mounted yet,
+#   this filesystem remains read/write even if the tmp directory is already
+#   on a read-only filesystem
+# return: exit - cannot mount the tmpfs filesystem
+#         0 - ok or clean exit in progress
+mount_tmpfs() {
+
+    [[ "$CE_RUNNING" = 0 ]] && return 0
+
+    local size="$1"
+
+    if ! grep -Eq "^tmpfs[[:blank:]]+$WORKDIR/tmpfs" /proc/mounts; then
+	mount -t tmpfs  -o size="$size",mode=755,uid=0,gid=0 \
+            tmpfs "$WORKDIR/tmpfs"
+	if [[ $? -eq 0 ]]; then
+	    add_exit_cmd 'umount_tmpfs'
+	else
+            echo "$PROGNAME: cannot mount the tmpfs filesystem to the directory" >&2
+            echo "$PNSPACES  '$WORKDIR/tmpfs'" >&2
+            clean_exit 2
+	fi
+    fi
+
+    return 0
+    
+}
+
+
+# umount_tmpfs()
+#   unmount the tmpfs filesystem if it is mounted
+# return: 0 - ok (or not mounted)
+#         1 - cannot unmount the tmpfs filesystem
+umount_tmpfs() {
+
+    if grep -Eq "^tmpfs[[:blank:]]+$WORKDIR/tmpfs" /proc/mounts; then
+	umount "$WORKDIR/tmpfs"
+	if [[ $? -ne 0 ]]; then
+            echo "$PROGNAME: cannot unmount the tmpfs filesystem from the directory" >&2
+            echo "$PNSPACES  '$WORKDIR/tmpfs'" >&2
+	    return 1
+	fi
+    fi
+
+    return 0
+    
+}
+
+
+# read_config_file 'all'|'one.part' cfg_file
+#   read the configuration file cfg_file, each line of the configuration file
+#   which is not a comment consists of whitespace separated words, the words
+#   can be optionally enclosed in double quotes and can therefore also contain
+#   whitespace characters - space, tab, double quote and backslash may be part
+#   of a word too if they're escaped by a backslash, lines starting with #
+#   (optional whitespaces may precede #) are comments, currently only
+#   the pmdev, vmdev, passprompt, pmbackup, vm, host, parhostnum and mail
+#   lines are supported if 'all' is specified, they are used to define the
+#   PMDEV, VMDEV, PASSPROMPT, PMBACKUP, VM, HOST, PARHOSTNUM and MAILTO
+#   global  variables, only the allhost and dev lines are supported
+#   if 'one.part' is specified, they're used to define the ALLHOST and DEV
+#   global variables
+# return: exit -  the config file isn't readable or doesn't have correct format
+#                 if 'all' is specified
+#         0 - ok or clean exit in progress
+#         1 - the config file isn't readable or doesn't have correct format
+#             if 'one.part' is specified
+read_config_file() {
+
+    [[ "$CE_RUNNING" = 0 ]] && return 0
+
+    local mode="$1"
+    local cfg_file="$2" cfg_cont
+    local linenum line str fch wrd
+    local ifs
+    local ispmdev=1 isvmdev=1 ispassprompt=1 ispmbackup=1 isparhostnum=1
+    local issmtpserver=1 ismailfrom=1
+    local isallhost=1 isdev=1
+    local n
+
+    # check that the config file exists and is readable
+    if [[ "$mode" != 'one.part' ]]; then
+	if [[ -f "$cfg_file" && -r "$cfg_file" ]]; then
+	    cfg_cont="$(cat "$cfg_file")"
+	else
+            echo "$PROGNAME: cannot read the configuration file '$cfg_file'" >&2
+            clean_exit 2
+	fi
+    else
+	if [[ -f "$cfg_file" && -r "$cfg_file" ]]; then
+	    cfg_cont="$(cat "$cfg_file")"
+	else
+            echo "$PROGNAME: cannot read the configuration file '$cfg_file'" >&2
+	    return 1
+	fi
+    fi
+
+    # remove space, tab and newline from IFS so that the whole line
+    # including the leading whitespace is read by the read built-in
+    ifs="$IFS"
+    IFS=''
+
+    # read and process all lines from the file cfg_file
+    linenum=0
+    while read -r line; do
+        linenum="$((linenum+1))"
+
+        unset args
+        local -a args
+
+        # remove comments, i.e. lines beginning with #, optional whitespace
+        # may precede the # character
+        str=$(echo "$line" | sed -r 's/^([[:blank:]]*)#.*$/\1/')
+
+        # read words from the line read and store them into the args array
+        while true; do
+
+            # remove leading whitespace
+            str=$(echo "$str" | sed -nr 's#^[[:blank:]]*(.*)?$#\1#p')
+
+            # if there is no first character, i.e. no word, then break
+            fch="${str:0:1}"
+            if [[ -z "$fch" ]]; then
+                break
+
+            # if the first character isn't ", the word is delimited
+            # by whitespace that is not escaped by \
+            elif [[ "$fch" != '"' ]]; then
+                wrd=$(echo "$str" | sed -nr 's#^(([^[:blank:]"\\]*[\\][[:blank:]"\\])*[^[:blank:]"\\]*)([[:blank:]]+(.*))?$#\1#p')
+                str=$(echo "$str" | sed -nr 's#^(([^[:blank:]"\\]*[\\][[:blank:]"\\])*[^[:blank:]"\\]*)([[:blank:]]+(.*))?$#\4#p')
+
+            # if the first character is ", the word is delimited by
+            # double quotes that are not escaped by \ and the quoted words
+            # by whitespace
+            elif [[ "$fch" = '"' ]]; then
+                wrd=$(echo "$str" | sed -nr 's#^"(([^"\\]*[\\][[:blank:]"\\])*[^"\\]*)"([[:blank:]]+(.*))?$#\1#p')
+                str=$(echo "$str" | sed -nr 's#^"(([^"\\]*[\\][[:blank:]"\\])*[^"\\]*)"([[:blank:]]+(.*))?$#\4#p')
+            fi
+
+            # replace all characters escaped by \ in the word read
+            wrd=$(echo "$wrd" | sed -r 's#[\\]([[:blank:]"\\])#\1#g')
+
+            # store the resulting word into the args array
+            args[${#args[*]}]="$wrd"
+        done
+
+        # if the line has at least one word, check if it is correct and
+        # assign values to appropriate variables
+        if [[ ${#args[*]} -gt 0 ]]; then
+
+	    if [[ "$mode" != 'one.part' ]]; then
+
+		case "${args[0]}" in
+
+                    'pmdev')
+			if [[ "$ispmdev" = 0 ]]; then
+                            echo "$PROGNAME: pmdev defined multiple times in the config file" >&2
+                            clean_exit 2
+			fi
+			ispmdev=0
+			if [[ ${#args[*]} -ne 2 || -z "${args[1]}" ]]; then
+                            echo "$PROGNAME: incorrect format of the config line number $linenum:" >&2
+                            echo "$line" >&2
+                            clean_exit 2
+			fi
+			PMDEV="${args[1]}"
+			;;
+
+                    'vmdev')
+			if [[ "$isvmdev" = 0 ]]; then
+                            echo "$PROGNAME: vmdev defined multiple times in the config file" >&2
+                            clean_exit 2
+			fi
+			isvmdev=0
+			if [[ ${#args[*]} -ne 2 || -z "${args[1]}" ]]; then
+                            echo "$PROGNAME: incorrect format of the config line number $linenum:" >&2
+                            echo "$line" >&2
+                            clean_exit 2
+			fi
+			VMDEV="${args[1]}"
+			;;
+
+                    'passprompt')
+			if [[ "$ispassprompt" = 0 ]]; then
+                            echo "$PROGNAME: passprompt defined multiple times in the config file" >&2
+                            clean_exit 2
+			fi
+			ispassprompt=0
+			if [[ ${#args[*]} -ne 2 || -z "${args[1]}" ]]; then
+                            echo "$PROGNAME: incorrect format of the config line number $linenum:" >&2
+                            echo "$line" >&2
+                            clean_exit 2
+			fi
+			PASSPROMPT="${args[1]}"
+			;;
+
+                    'pmbackup')
+			if [[ "$ispmbackup" = 0 ]]; then
+                            echo "$PROGNAME: pmbackup defined multiple times in the config file" >&2
+                            clean_exit 2
+			fi
+			ispmbackup=0
+			if [[ ${#args[*]} -ne 2 || -z "${args[1]}" ]]; then
+                            echo "$PROGNAME: incorrect format of the config line number $linenum:" >&2
+                            echo "$line" >&2
+                            clean_exit 2
+			fi
+			PMBACKUP="${args[1]}"
+			;;
+
+		    'vm')
+			if [[ ${#args[*]} -lt 2 || -z "${args[1]}" ]]; then
+                            echo "$PROGNAME: incorrect format of the config line number $linenum:" >&2
+                            echo "$line" >&2
+                            clean_exit 2
+			fi
+			n="${#VM[*]}"
+			VM[n]="${args[1]}"
+			;;
+
+		    'host')
+			if [[ ${#args[*]} -lt 2 || -z "${args[1]}" ]]; then
+                            echo "$PROGNAME: incorrect format of the config line number $linenum:" >&2
+                            echo "$line" >&2
+                            clean_exit 2
+			fi
+			n="${#HOST[*]}"
+			HOST[n]="${args[1]}"
+			;;
+
+                    'parhostnum')
+			if [[ "$isparhostnum" = 0 ]]; then
+                            echo "$PROGNAME: parhostnum defined multiple times in the config file" >&2
+                            clean_exit 2
+			fi
+			isparhostnum=0
+			if [[ ${#args[*]} -ne 2 || -z "${args[1]}" ]]; then
+                            echo "$PROGNAME: incorrect format of the config line number $linenum:" >&2
+                            echo "$line" >&2
+                            clean_exit 2
+			fi
+			PARHOSTNUM="${args[1]}"
+			;;
+
+		    'mailto')
+			if [[ ${#args[*]} -lt 2 || -z "${args[1]}" ]]; then
+                            echo "$PROGNAME: incorrect format of the config line number $linenum:" >&2
+                            echo "$line" >&2
+                            clean_exit 2
+			fi
+			n="${#MAILTO[*]}"
+			MAILTO[n]="${args[1]}"
+			;;
+
+                    'smtpserver')
+			if [[ "$issmtpserver" = 0 ]]; then
+                            echo "$PROGNAME: smtpserver defined multiple times in the config file" >&2
+                            clean_exit 2
+			fi
+			issmtpserver=0
+			if [[ ${#args[*]} -ne 2 || -z "${args[1]}" ]]; then
+                            echo "$PROGNAME: incorrect format of the config line number $linenum:" >&2
+                            echo "$line" >&2
+                            clean_exit 2
+			fi
+			SMTPSERVER="${args[1]}"
+			;;
+
+                    'mailfrom')
+			if [[ "$ismailfrom" = 0 ]]; then
+                            echo "$PROGNAME: mailfrom defined multiple times in the config file" >&2
+                            clean_exit 2
+			fi
+			ismailfrom=0
+			if [[ ${#args[*]} -ne 2 || -z "${args[1]}" ]]; then
+                            echo "$PROGNAME: incorrect format of the config line number $linenum:" >&2
+                            echo "$line" >&2
+                            clean_exit 2
+			fi
+			MAILFROM="${args[1]}"
+			;;
+
+                    *)
+			echo "$PROGNAME: incorrect format of the config line number $linenum:" >&2
+			echo "$line" >&2
+			clean_exit 2
+			;;
+		esac
+
+	    else
+
+		case "${args[0]}" in
+
+                    'allhost')
+			if [[ "$isallhost" = 0 ]]; then
+                            echo "$PROGNAME: allhost defined multiple times in the config file" >&2
+			    return 1
+			fi
+			isallhost=0
+			if [[ ${#args[*]} -ne 2 || -z "${args[1]}" ]]; then
+                            echo "$PROGNAME: incorrect format of the config line number $linenum:" >&2
+                            echo "$line" >&2
+			    return 1
+			fi
+			ALLHOST="${args[1]}"
+			;;
+		    
+                    'dev')
+			if [[ "$isdev" = 0 ]]; then
+                            echo "$PROGNAME: dev defined multiple times in the config file" >&2
+			    return 1
+			fi
+			isdev=0
+			if [[ ${#args[*]} -ne 2 || -z "${args[1]}" ]]; then
+                            echo "$PROGNAME: incorrect format of the config line number $linenum:" >&2
+                            echo "$line" >&2
+			    return 1
+			fi
+			DEV="${args[1]}"
+			;;
+
+                    *)
+			echo "$PROGNAME: incorrect format of the config line number $linenum:" >&2
+			echo "$line" >&2
+			return 1
+			;;
+		esac
+
+	    fi
+
+        fi
+
+    done <<EOF_TARLVMALL_CONF_821
+$(echo "$cfg_cont")
+EOF_TARLVMALL_CONF_821
+
+    IFS="$ifs"
+
+    return 0
+
+}
+
+
+# check_config() 'all'|'one.part' [vmname] [noendlf]
+#   check that the configuration is correct, i.e. that the PMDEV, VMDEV,
+#   PMBACKUP and PARHOSTNUM values and at least one VM or HOST value
+#   are defined  if 'all' is specified and that the DEV value is
+#   defined if 'one.part' is specified, vmname specifies the name
+#   of the machine whose 'one.part' configuration should be checked,
+#   this name is used for error reporting purposes only, if noendlf argument
+#   is specified in the 'one.part' mode, output the last line of potential
+#   error message without trailing LF - this argument doesn't affect
+#   the 'all' mode
+# return: exit -  some necessary configuration item is missing
+#         1 - the DEV variable is empty
+#         0 - ok or clean exit in progress
+check_config() {
+
+    [[ "$CE_RUNNING" = 0 ]] && return 0
+
+    local mode="$1"
+    local vmname="$2"
+    local noendlf="$3"
+
+    if [[ "$mode" != 'one.part' ]]; then
+
+	if [[ "${#VM[@]}" -gt 0 ]]; then
+
+	    if [[ -z "$PMDEV" ]]; then
+		echo "$PROGNAME: backup device on the physical machine must be defined" >&2
+		echo "$PNSPACES  if at least one virtual machine should be backed up," >&2
+		echo "$PNSPACES  see the 'pmdev' and 'vm' directives in the configuration" >&2
+		echo "$PNSPACES  file" >&2
+		clean_exit 2
+	    fi
+
+	    if [[ -z "$VMDEV" ]]; then
+		echo "$PROGNAME: backup device on the virtual machines must be defined" >&2
+		echo "$PNSPACES  if at least one virtual machine should be backed up," >&2
+		echo "$PNSPACES  see the 'vmdev' and 'vm' directives in the configuration" >&2
+		echo "$PNSPACES  file" >&2
+		clean_exit 2
+	    fi
+
+	fi
+
+	if [[ -z "$PMBACKUP" && "${#VM[@]}" = 0 && "${#HOST[@]}" = 0 ]]; then
+            echo "$PROGNAME: no host to backup specified in the configuration file," >&2
+	    echo "$PNSPACES  see the 'pmbackup', 'vm' and 'host' directives" >&2
+            clean_exit 2	    
+	fi
+
+	if [[ -z "$PARHOSTNUM" ]] || echo "$PARHOSTNUM" | grep -Evq '^[1-9][0-9]*$'; then
+            echo "$PROGNAME: number of hosts to backup in parallel not specified" >&2
+	    echo "$PNSPACES  in the configuration file or not specified" >&2
+	    echo "$PNSPACES  as a positive integer, see the 'parhostnum directive" >&2
+            clean_exit 2
+	fi
+
+	if [[ "${#MAILTO[*]}" -eq 0 ]]; then
+	    MAILTO[0]='root'
+	fi
+
+	[[ -z "$SMTPSERVER" ]] && unset MAILFROM
+
+    else
+
+	if [[ -z "$DEV" ]]; then
+
+	    if [[ -z "$vmname" ]]; then
+		echo "$PROGNAME: backup device not configured on unknown machine," >&2
+	    else
+		echo "$PROGNAME: backup device not configured on machine '$vmname'," >&2
+	    fi
+
+	    echo -n "$PNSPACES  edit its configuration files" >&2
+	    [[ -z "$noendlf" ]] && echo >&2
+	    return 1
+	fi
+
+    fi
+
+    return 0
+    
+}
+
+
+# check_uuid_presence()
+#   check whether the UUID syntax is used in the configuration
+# return:
+#   0 - used
+#   1 - not used
+check_uuid_presence() {
+
+    echo "${PMDEV:0:5}" | grep -qi '^UUID=$'
+    [[ $? -eq 0 ]] && return 0
+
+    return 1
+    
+}
+
+
+# check_addon_tools()
+#   check if add-on tools that are necessary for proper operation are present
+#   in the system, the specific tools depend on given script arguments
+#   or configuration
+# return: exit - some of the tools are missing
+#         0 - ok
+check_addon_tools() {
+
+    [[ "$CE_RUNNING" = 0 ]] && return 0
+
+    local ec=0
+
+    # check that the blkid binary exists if UUID= is used in the configuration
+    if check_uuid_presence; then
+	if ! which blkid >/dev/null; then
+	    echo "$PROGNAME: 'blkid' binary not found and UUID= syntax used" >&2
+	    echo "$PNSPACES  in the config file" >&2
+	    ec=2
+	fi
+    fi
+
+    # check that virsh binary exists if at least one vm is specified
+    if [[ "${#VM[@]}" -gt 0 ]]; then
+	if ! which virsh >/dev/null; then
+	    echo "$PROGNAME: 'virsh' binary not found and at least one virtual" >&2
+	    echo "$PNSPACES  machine specified in the config file" >&2
+	    ec=2
+	fi
+    fi
+
+    [[ "$ec" -ne 0 ]] && clean_exit "$ec"
+    return 0
+    
+}
+
+
+# create_uuid_file
+#   find all block devices in /dev which have uuid assigned and create
+#   file filename in the tmpfs directory which maps uuids to devices
+# return: exit - cannot create uuid file
+#         0 - ok or clean exit in progress
+create_uuid_file() {
+
+    [[ "$CE_RUNNING" = 0 ]] && return 0
+    
+    local dev
+    local uuid
+
+    if [[ -e "$WORKDIR/tmpfs/$UUID_FILE" ]]; then
+	rm -fr "$WORKDIR/tmpfs/$UUID_FILE"
+	if [[ $? -ne 0 ]]; then
+	    echo "$PROGNAME: cannot delete file '$UUID_FILE'" >&2
+	    echo "$PNSPACES  from the directory '$WORKDIR/tmpfs' on the tmpfs filesystem" >&2
+	    clean_exit 2
+	fi
+    fi
+
+    if check_uuid_presence; then
+	find /dev -type b \
+	    | while read dev; do
+		  uuid="$(blkid "$dev" | sed -nr 's#^.*[[:blank:]](PT)?UUID=\"([^\"]*)\".*$#\2#p')"
+		  if [[ -n "$uuid" ]]; then
+		      echo "$uuid $dev" >>"$WORKDIR/tmpfs/$UUID_FILE"
+		      if [[ $? -ne 0 ]]; then
+			  echo "$PROGNAME: cannot create file '$UUID_FILE'" >&2
+			  echo "$PNSPACES  in the directory '$WORKDIR/tmpfs' on the tmpfs filesystem" >&2
+			  clean_exit 2
+		      fi
+		  fi
+	      done
+    fi
+
+    return 0
+    
+}
+
+
+# get_uuid_device uuid
+#   print path to the device with the given uuid as specified in the uuid file
+#   uuid_filename, print nothing if no device with uuid found
+# return: 0 - ok
+get_uuid_device() {
+
+    local uuid="$1"
+
+    grep -i "^$uuid[[:blank:]]" "$WORKDIR/tmpfs/$UUID_FILE" \
+	| head -1 \
+	| sed -nr 's#^[^[:blank:]]+[[:blank:]]+([^[:blank:]]+)$#\1#p'
+
+    return 0
+}
+
+
+# create_devdef_file() devicename
+#   create libvirt device definition file to access a device devicename
+#   attached to physical machine from virtual machines
+# return: exit (and umount tmpfs) - cannot (re)create the devdeffile
+#         0 - ok or clean exit in progress
+create_devdef_file() {
+
+    [[ "$CE_RUNNING" = 0 ]] && return 0
+
+    local devicename="$1"
+
+    local uuid device
+    
+    rm -f "$WORKDIR/tmpfs/$DEVDEFFILE"
+    if [[ $? -ne 0 ]]; then
+	echo "$PROGNAME: cannot delete device definition file '$DEVDEFFILE'" >&2
+	echo "$PNSPACES  from the directory '$WORKDIR/tmpfs' on the tmpfs filesystem," >&2
+	echo "$PNSPACES  cannot continue" >&2
+	clean_exit 2
+    fi
+
+    # find the path to the backup device (can be specified by uuid)
+    if echo "${devicename:0:5}" | grep -qi '^UUID=$'; then
+	uuid="$(echo "$devicename" | sed -r 's#^....=##')"
+	device="$(get_uuid_device "$uuid")"
+    else
+	device="/dev/$devicename"
+    fi
+
+    cat <<EOF_TARLVMALL_DEVDEF_821 >"$WORKDIR/tmpfs/$DEVDEFFILE"
+<disk type='block' device='disk'>
+  <driver name='qemu' type='raw' cache='none' io='native'/>
+  <source dev='$device'/>
+  <target dev='$VMDEV' bus='virtio'/>
+</disk>
+EOF_TARLVMALL_DEVDEF_821
+
+    if [[ $? -ne 0 ]]; then
+	echo "$PROGNAME: cannot create device definition file '$DEVDEFFILE'" >&2
+	echo "$PNSPACES  in the directory '$WORKDIR/tmpfs' on the tmpfs filesystem," >&2
+	echo "$PNSPACES  cannot continue" >&2
+	clean_exit 2
+    fi
+
+    return 0
+    
+}
+
+
+# clean_backup_device() dev [vm]
+#   detach backup device dev from virtual machine vm if it is attached
+#   or from any configured vm it is attached to if vm isn't specified,
+#   backup device can be specified as UUID=... or as absolute device path
+# return: exit - critical error occured, cannot continue
+#         0 - ok (detached or not found) or clean exit in progress
+#         1 - error occured, device not detached, but we can still continue
+#             with cleanup
+clean_backup_device() {
+
+    local dev="$1"
+    local vm="$2"
+
+    local uuid
+    local device
+
+    [[ "$CE_RUNNING" = 0 ]] && return 0
+
+    # find out device path and create qemu device definiton file
+    uuid="${dev#UUID=}"
+    [[ "$uuid" = "$dev" ]] && uuid=''
+
+    if [[ -n "$uuid" ]]; then
+	device="$(get_uuid_device "$uuid")"
+    else
+	device="$dev"
+    fi
+    create_devdef_file "$device"
+
+    # find out vm to which the backup device is attached to
+    if [[ -z "$vm" ]]; then
+
+	for vm in "${VM[@]}"; do
+
+	    vm_v="$(echo "$vm" | sed -r 's#^([^:]*):.*$#\1#')"
+
+	    if virsh domblklist "$vm_v" | grep -Eq "^[^[:blank:]]+[[:blank:]]+$device\$"; then
+		break
+	    fi
+	    
+	    vm_v=''
+	    
+	done
+
+    else
+
+	vm_v="$(echo "$vm" | sed -r 's#^([^:]*):.*$#\1#')"
+	
+	if ! virsh domblklist "$vm_v" | grep -Eq "^[^[:blank:]]+[[:blank:]]+$device\$"; then
+	    vm_v=''
+	fi
+	    	
+    fi
+
+    # detach device from vm if found
+    if [[ -n "$vm_v" ]]; then
+	virsh detach-device "$vm_v" "$WORKDIR/tmpfs/$DEVDEFFILE" >/dev/null
+	if [[ $? -ne 0 ]]; then
+	    echo "$PROGNAME: cannot detach backup device from virtual machine '$vm_v'" >&2
+	    return 1
+	fi
+    fi
+	
+    return 0
+    
+}
+
+
+# clean()
+#   perform local cleanup, i.e. detach the backup device from some virtual
+#   machine if attached and unmount tmpfs filesystem if mounted
+# return: 0 - ok
+#         1 - backup device not detached or tmpfs filesystem not unmounted
+clean() {    
+
+    local ec=0
+
+    # detach backup device from vm it is attached to
+    clean_backup_device "$PMDEV"
+    [[ "$?" -ne 0 ]] && ec=1
+
+    # unmount tmpfs filesystem if mounted
+    umount_tmpfs
+    [[ "$?" -ne 0 ]] && ec=1
+
+    return "$ec"
+    
+}
+
+
+# all() cfgfile_one_local cfgfile_one_shared devpassvar vmperiod
+#   run all actions related to all vms and then hosts to backup, i.e. get
+#   the needed lines from the local and shared configuration file
+#   for tar-lvm-one for each vm/host, read this configuration, attach
+#   the backup device using devdeffile if backing up a vm (not just host),
+#   run tar-lvm-one via bgrun in the requested mode on the host/vm and pass
+#   it the password contained in the exported variable devpassvar
+#   (the password can be empty so that tar-lvm-one asks for one), wait until
+#   tar-lvm-one is done on the vm/host, then detach the backup device
+#   from the vm, vms are backed up serially, but hosts in parallel,
+#   maximal number of hosts to back up in parallel is specified
+#   in the PARHOSTNUM configuration variable, cleanup or check can be
+#   optionally performed on all machines in the clean or check mode instead
+# return: exit - critical error occured, cannot continue
+#         0 - ok or clean exit in progress
+#         1 - error occured, but we can still backup next vm host
+all() {
+
+    [[ "$CE_RUNNING" = 0 ]] && return 0
+
+    local cfgfile_one_local="$1"
+    local cfgfile_one_shared="$2"
+    local devpassvar="$3"
+    local hostperiod="$4"
+
+    local ec=0 result='OK'
+    local i vmstr vmhost ispm=0 isvm=0 parvmhostnum=1 parvmhosts=''
+    local vh_fail vh fail fail_now
+    
+    # unset tar-lvm-one config variables
+    unset ALLHOST
+    unset DEV
+
+    # process all pm/vms/hosts and add a dummy host to wait
+    # for all to finish
+    vmstr="$vmstr /"
+    
+    for vmhost in localhost "${VM[@]}" : "${HOST[@]}" $vmstr; do
+
+	vmhost_v="$(echo "$vmhost" | sed -r 's#^([^:]*):.*$#\1#')"
+	vmhost_h="$(echo "$vmhost" | sed -r 's#^[^:]*:(.*)$#\1#')"
+	
+	# skip most actions except waiting for parallel backups to finish
+	# if processing just dummy host entry
+	if [[ "$vmhost" != '/' ]]; then	    
+
+	    # if this is the first iteration and physical machine shouldn't be
+	    # backed up, skip this iteration
+	    if [[ -n "$ispm" && "$PMBACKUP" != 'true' ]]; then
+		unset ispm
+		continue
+	    fi
+
+	    # delimiter ':' instead of vm/host changes the type of vm/host
+	    # from vm to host
+	    if [[ "$vmhost" = ':' ]]; then
+		if [[ "$ARG_MODE" != 'clean' && "$ARG_MODE" != 'check' ]]; then
+		    parvmhostnum="$PARHOSTNUM"
+		fi
+		unset isvm		
+		continue		
+	    fi
+	    
+	    # print status info in the clean and check mode
+	    if [[ "$ARG_MODE" = 'clean' ]]; then
+		echo "$PROGNAME: starting cleanup on host '$vmhost_v'"
+	    elif [[ "$ARG_MODE" = 'check' ]]; then
+		echo "$PROGNAME: starting check on host '$vmhost_v'"
+	    fi		
+
+	    # get local tar-lvm-one config file from the vm or host, we need
+	    # allhost and dev lines, then read it to get the allhost
+	    if [[ "$ARG_MODE" != 'clean' ]]; then
+
+		if [[ -e "$WORKDIR/tmpfs/$cfgfile_one_local.part" ]]; then 
+		    rm -fr "$WORKDIR/tmpfs/$cfgfile_one_local.part"
+		    if [[ $? -ne 0 ]]; then
+			echo "$PROGNAME: cannot delete temporary file '$cfgfile_one_local.part'" >&2
+			echo "$PNSPACES  from the directory '$WORKDIR/tmpfs' on the tmpfs filesystem" >&2
+			echo "$PNSPACES  before recreating new one for host '$vmhost_v'," >&2
+			echo "$PNSPACES  skipping '$vmhost_v' backup ..." >&2
+			ec=1
+			continue
+		    fi
+		fi
+
+		ssh -x -A "root@$vmhost_h" "[ -r '$CONFDIR/$cfgfile_one_local' ] && ( grep -E '^[[:blank:]]*(allhost|dev)([[:blank:]]+.*)?$' '$CONFDIR/$cfgfile_one_local' || true )" >"$WORKDIR/tmpfs/$cfgfile_one_local.part" 2>"$WORKDIR/tmpfs/stderr.tmp"
+
+		if [[ $? -ne 0 ]]; then
+		    grep -Ev '^stdin: is not a tty$' "$WORKDIR/tmpfs/stderr.tmp" >&2
+		    echo "$PROGNAME: cannot create temporary file '$cfgfile_one_local.part'" >&2
+		    echo "$PNSPACES  in the directory '$WORKDIR/tmpfs' on the tmpfs filesystem" >&2
+		    echo "$PNSPACES  for host '$vmhost_v', skipping '$vmhost_v' backup ..." >&2
+		    ec=1
+		    continue
+		fi
+
+		read_config_file 'one.part' "$WORKDIR/tmpfs/$cfgfile_one_local.part"
+		if [[ $? -ne 0 ]]; then
+		    echo "$PROGNAME: cannot read config file '$cfgfile_one_local.part'" >&2
+		    echo "$PNSPACES  in the directory '$WORKDIR/tmpfs' on the tmpfs filesystem" >&2
+		    echo "$PNSPACES  for host '$vmhost_v', skipping '$vmhost_v' backup ..." >&2
+		    ec=1
+		    continue
+		fi
+
+	    fi
+	    
+	    # get shared tar-lvm-one config file from the "all" host if allhost
+	    # was specifed in the local config file, we need dev line
+	    if [[ "$ARG_MODE" != 'clean' ]]; then
+
+		if [[ -n "$ALLHOST" ]]; then
+		    if [[ -e "$WORKDIR/tmpfs/$cfgfile_one_shared.part" ]]; then
+			rm -fr "$WORKDIR/tmpfs/$cfgfile_one_shared.part"
+			if [[ $? -ne 0 ]]; then
+			    echo "$PROGNAME: cannot delete temporary file '$cfgfile_one_shared.part'" >&2
+			    echo "$PNSPACES  from the directory '$WORKDIR/tmpfs' on the tmpfs filesystem" >&2
+			    echo "$PNSPACES  before recreating new one for host '$vmhost_v'," >&2
+			    echo "$PNSPACES  skipping '$vmhost_v' backup ..." >&2
+			    ec=1
+			    continue
+			fi
+		    fi
+
+		    [[ -r "$CONFDIR/$cfgfile_one_shared" ]] && ( grep -E '^[[:blank:]]*(dev)([[:blank:]]+.*)?$' "$CONFDIR/$cfgfile_one_shared" || true ) >"$WORKDIR/tmpfs/$cfgfile_one_shared.part"
+		    if [[ $? -ne 0 ]]; then
+			echo "$PROGNAME: cannot create temporary file '$cfgfile_one_shared.part'" >&2
+			echo "$PNSPACES  in the directory '$WORKDIR/tmpfs' on the tmpfs filesystem" >&2
+			echo "$PNSPACES  for host '$vmhost_v', skipping '$vmhost_v' backup ..." >&2
+			ec=1
+			continue
+		    fi
+		fi
+
+	    fi
+
+	    # read the obtained tar-lvm-one config files
+	    if [[ "$ARG_MODE" != 'clean' ]]; then
+		if [[ -n "$ALLHOST" ]]; then
+		    read_config_file 'one.part' "$WORKDIR/tmpfs/$cfgfile_one_shared.part"
+		    read_config_file 'one.part' "$WORKDIR/tmpfs/$cfgfile_one_local.part"
+		fi
+		if ! check_config 'one.part' "$vmhost_v" 'y'; then
+		    echo ", skipping '$vmhost_v' backup ..." >&2
+		    ec=1
+		    continue
+		fi
+	    fi
+
+	    # attach the pmdev device to vm (not to pm in the first
+	    # iteration)
+	    if [[ "$ARG_MODE" != 'clean' ]]; then
+		if [[ -n "$isvm" && -z "$ispm" ]]; then
+		    virsh attach-device "$vmhost_v" "$WORKDIR/tmpfs/$DEVDEFFILE" >/dev/null
+		    if [[ $? -ne 0 ]]; then
+			echo "$PROGNAME: cannot attach backup device to virtual machine '$vmhost_v'," >&2
+			echo "$PNSPACES  skipping '$vmhost_v' backup ..." >&2
+			ec=1
+			continue
+		    fi
+
+		    # give the vm some time to create the device
+		    sleep 4
+		fi
+	    fi
+
+	    # run tar-lvm-one via bgrun on each machine
+	    unset TAR_LVM_ONE_F
+	    [[ "$ARG_F" = 'y' ]] && TAR_LVM_ONE_F='-f'	    
+
+	    if [[ "$ARG_MODE" = 'clean' ]]; then
+
+		ssh -x -A "root@$vmhost_h" "tar-lvm-one $ARG_MODE 2>&1" 2>"$WORKDIR/tmpfs/stderr.tmp"
+		if [[ $? -eq 0 ]]; then
+		    if [[ -z "$parvmhosts" ]]; then
+			parvmhosts="$vmhost/0"
+		    else
+			parvmhosts="$parvmhosts $vmhost/0"
+		    fi
+		else
+		    grep -Ev '^stdin: is not a tty$' "$WORKDIR/tmpfs/stderr.tmp" >&2
+		    echo "$PROGNAME: tar-lvm-one failed on host '$vmhost_v'" >&2
+		    ec=1
+		fi
+
+	    elif [[ "$ARG_MODE" = 'check' ]]; then
+
+		echo -n \
+		    | awk 'BEGIN {printf("%s\n", ENVIRON["'"$devpassvar"'"]);}' \
+		    | ssh -x -A "root@$vmhost_h" "bash -c 'read -s TAR_LVM_ONE_PASSWORD; export TAR_LVM_ONE_PASSWORD; tar-lvm-one $ARG_MODE $ARG_LEVEL 2>&1'" 2>"$WORKDIR/tmpfs/stderr.tmp"
+		if [[ $? -eq 0 ]]; then
+		    if [[ -z "$parvmhosts" ]]; then
+			parvmhosts="$vmhost/0"
+		    else
+			parvmhosts="$parvmhosts $vmhost/0"
+		    fi
+		else
+		    grep -Ev '^stdin: is not a tty$' "$WORKDIR/tmpfs/stderr.tmp" >&2
+		    echo "$PROGNAME: tar-lvm-one failed on host '$vmhost_v'" >&2
+		    ec=1
+		fi		
+		
+	    else
+	    
+		echo -n \
+		    | awk 'BEGIN {printf("%s\n", ENVIRON["'"$devpassvar"'"]);}' \
+		    | ssh -x -A "root@$vmhost_h" "bash -c 'read -s TAR_LVM_ONE_PASSWORD; export TAR_LVM_ONE_PASSWORD; bgrun $MAILFROM $SMTPSERVER ${MAILTO[@]} -- tar-lvm-one $TAR_LVM_ONE_F $ARG_MODE $ARG_LEVEL'" 2>"$WORKDIR/tmpfs/stderr.tmp"
+		if [[ $? -eq 0 ]]; then
+		    if [[ -z "$parvmhosts" ]]; then
+			parvmhosts="$vmhost/0"
+		    else
+			parvmhosts="$parvmhosts $vmhost/0"
+		    fi
+		else
+		    grep -Ev '^stdin: is not a tty$' "$WORKDIR/tmpfs/stderr.tmp" >&2
+		    echo "$PROGNAME: tar-lvm-one failed on host '$vmhost_v'" >&2
+		    ec=1
+		fi
+		
+	    fi
+
+	fi
+	
+	# wait until not all tar-lvm-one processes run on vms/hosts
+	while true; do
+	    sleep "$hostperiod"
+	    
+	    [[ "$ARG_V" = y ]] && echo "VMs|hosts> $parvmhosts (max: $parvmhostnum)"
+
+	    for vh_fail in $parvmhosts; do
+
+		vh="$(echo "$vh_fail" | cut -d/ -f1)"
+		vh_v="$(echo "$vh" | sed -r 's#^([^:]*):.*$#\1#')"
+		vh_h="$(echo "$vh" | sed -r 's#^[^:]*:(.*)$#\1#')"
+		fail="$(echo "$vh_fail" | cut -d/ -f2)"
+		fail_now=1
+		
+		if [[ -e "$WORKDIR/tmpfs/tar-lvm-one.runs" ]]; then
+		    rm -fr "$WORKDIR/tmpfs/tar-lvm-one.runs"
+		    if [[ $? -ne 0 ]]; then
+			echo "$PROGNAME: cannot delete temporary file 'tar-lvm-one.runs'" >&2
+			echo "$PNSPACES  from the directory '$WORKDIR/tmpfs' on the tmpfs filesystem" >&2		
+			echo "$PNSPACES  and thus cannot find out if tar-lvm-one still runs" >&2
+			echo "$PNSPACES  on host '$vh_v'" >&2
+			fail_now=0
+		    fi
+		fi
+
+		if [[ "$fail_now" != 0 ]]; then
+		    ssh -x -A "root@$vh_h" "bash -c 'echo -n TAR-LVM-ONE-COMMAND-RUNS: && ps -e -o comm= | grep ^tar-lvm-one\$ || true'" >"$WORKDIR/tmpfs/tar-lvm-one.runs" 2>"$WORKDIR/tmpfs/stderr.tmp"
+		    if [[ $? -ne 0 ]]; then
+			grep -Ev '^stdin: is not a tty$' "$WORKDIR/tmpfs/stderr.tmp" >&2
+			echo "$PROGNAME: cannot find out if tar-lvm-one still runs" >&2
+			echo "$PNSPACES  on host '$vh_v'" >&2
+			fail_now=0
+		    fi
+		fi
+
+		if [[ "$fail_now" != 0 ]]; then
+		    if [[ "$(grep '^TAR-LVM-ONE-COMMAND-RUNS:tar-lvm-one$' "$WORKDIR/tmpfs/tar-lvm-one.runs" | wc -l)" = 0 ]]
+		    then		    
+			parvmhosts="$(echo "$parvmhosts" | sed -r "s#^(.*[[:blank:]])?$vh/[[:digit:]]+([[:blank:]].*)?\$#\\1\\2#g")"
+		    else
+			parvmhosts="$(echo "$parvmhosts" | sed -r "s#^(.*[[:blank:]])?($vh)/[[:digit:]]+([[:blank:]].*)?\$#\\1 \\2/0 \\3#g")"
+		    fi
+		else
+		    fail="$((fail + 1))"
+		    if [[ "$fail" -ge "$SSHCHECK_RETRIES" ]]; then
+			parvmhostnum="$((parvmhostnum - 1))"
+			parvmhosts="$(echo "$parvmhosts" | sed -r "s#^(.*[[:blank:]])?$vh/[[:digit:]]+([[:blank:]].*)?\$#\\1\\2#g")"
+			echo "$PROGNAME: '$fail' consecutive SSH failures for host '$vh_v'" >&2
+			echo "$PNSPACES   occured, maximal number of hosts to backup in parallel" >&2
+			echo "$PNSPACES   decreased to '$parvmhostnum'" >&2
+		    else
+			parvmhosts="$(echo "$parvmhosts" | sed -r "s#^(.*[[:blank:]])?$vh/[[:digit:]]+([[:blank:]].*)?\$#\\1$vh/$fail\\2#g")"
+			echo "$PROGNAME: '$fail' consecutive SSH failures for host '$vh_v'" >&2
+			echo "$PNSPACES   occured, waiting for next attempt ..." >&2
+		    fi		    
+		fi
+		parvmhosts="$(echo "$parvmhosts" | sed -r 's#[[:blank:]]+# #g')"
+		parvmhosts="$(echo "$parvmhosts" | sed -r 's#^[[:blank:]]*##g')"
+		parvmhosts="$(echo "$parvmhosts" | sed -r 's#[[:blank:]]*$##g')"
+	    done
+
+	    [[ "$parvmhostnum" = 0 ]] && break
+
+	    if [[ "$vmhost" != '/' ]]; then
+		[[ "$(echo "$parvmhosts" | sed -r 's#[[:blank:]]+#\n#g' | grep -v '^[[:blank:]]*$' | wc -l)" -lt "$parvmhostnum" ]] && break		
+	    else
+		echo "$parvmhosts" | grep -Eq '^[[:blank:]]*$' && break
+	    fi
+	    	    
+	done
+
+	# detach the pmdev device from vm (not from pm in the first
+	# iteration)
+	if [[ "$ARG_MODE" != 'clean' || "$parvmhostnum" = 0 ]]; then
+	    if [[ -n "$isvm" && -z "$ispm" ]]; then
+		virsh detach-device "$vmhost_v" "$WORKDIR/tmpfs/$DEVDEFFILE" >/dev/null
+		if [[ $? -ne 0 ]]; then
+		    echo "$PROGNAME: cannot detach backup device from virtual machine '$vmhost_v'," >&2
+		    echo "$PNSPACES  cannot continue" >&2
+		    clean_exit 3
+		fi
+	    fi
+	fi
+
+	# print status info in the clean and check mode
+	if [[ "$vmhost_v" != '/' ]]; then
+	    if [[ "$ARG_MODE" = 'clean' ]]; then
+		echo "$PROGNAME: cleanup on host '$vmhost_v' finished"
+		echo
+	    elif [[ "$ARG_MODE" = 'check' ]]; then
+		echo "$PROGNAME: check on host '$vmhost_v' finished"
+		echo
+	    fi
+	fi
+
+	# exit if number of hosts to backup in parallel reached 0
+	if [[ "$parvmhostnum" = 0 ]]; then
+	    echo "$PROGNAME: maximal number of hosts to backup in parallel reached 0," >&2
+	    echo "$PNSPACES  cannot continue" >&2
+	    clean_exit 4
+	fi
+	    
+	# wait some time so that all vms are ready to accept ssh connections even after fast pm backup
+	if [[ "$ARG_MODE" != 'clean' ]]; then
+	    [[ -n "$ispm" && "$PMBACKUP" = 'true' ]] && sleep "$POSTPM_DELAY"
+	fi
+	
+	# set flag to recognize first iteration (pm backup)
+	unset ispm
+
+    done
+
+    # print result in check mode or perform local cleanup if requested
+    if [[ "$ARG_MODE" = 'check' ]]; then
+	[[ "$ec" != 0 ]] && result='FAILURE'
+	echo "$PROGNAME: result => $result"
+	echo	
+    elif [[ "$ARG_MODE" = 'clean' ]]; then
+	clean
+	[[ $? -ne 0 ]] && ec=1
+    fi
+
+    return "$ec"
+    
+}
+
+
+###### MAIN ###################################################################
+
+### check tools, parse and check arguments
+
+# check if all the external tools are available on the system
+check_tools grep id ps cat rm mount umount sed true find head ssh awk
+
+# parse and check arguments
+parse_args "$@"
+check_args
+
+[[ "$ARG_MODE" = 'help' ]] && usage
+
+# check if the script is called by root
+check_root_id
+
+# check if the script is not running yet
+check_if_running
+
+# check working directory
+check_work_dir
+
+# read the configuration file and check configuration
+read_config_file 'all' "$CONFDIR/$CONFFILE"
+check_config 'all'
+
+# check add-on tools presence
+check_addon_tools
+
+# mount the tmpfs filesystem which is always read/write
+mount_tmpfs "$TMPFS_SIZE"
+
+# create file which maps uuids to device names
+create_uuid_file
+
+# create libvirt device definition file to access the backup device
+# from virtual machines if at least one should be backed up
+[[ "${#VM[@]}" -gt 0 ]] && create_devdef_file "$PMDEV"
+
+# prompt for password to decrypt the backup device if needed
+unset BKPDEVPASSWORD
+if [[ ( "$ARG_MODE" = 'pre' || "$ARG_MODE" = 'run' ||
+	      "$ARG_MODE" = 'post' || "$ARG_MODE" = 'all' ||
+	      "$ARG_MODE" = 'check' ) &&
+	  "$PASSPROMPT" = 'true' ]]; then
+    echo -n 'Enter the password for the backup device: '
+    read -s BKPDEVPASSWORD
+    echo
+    export BKPDEVPASSWORD
+fi
+
+
+### backup all virtual machines, hosts and optionally also the physical
+### machine at the beginning or just some part of it depending
+### on the mode or perform cleanup instead if requested
+all "$CONFFILE_ONE_LOCAL" "$CONFFILE_ONE_SHARED" \
+    BKPDEVPASSWORD "$VMCHECK_PERIOD"
+[[ $? -ne 0 ]] && EC=3
+
+
+### clean exit
+clean_exit "$EC"

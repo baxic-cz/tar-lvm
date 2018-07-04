@@ -1,0 +1,131 @@
+<!DOCTYPE html
+     PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN"
+    "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="cs" lang="cs">
+
+
+  <head>
+
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+
+    <title>Installation</title>
+
+  </head>
+
+
+  <body>
+
+    <div id="wrapper_outter">
+
+      <div id="wrapper">
+        
+        <div id="maincontainer1">
+
+          <div id="main1">
+
+            <div id="title">
+
+              <h3>Tar-LVM</h3>
+              
+            </div><!-- title -->
+
+            <div id="content">
+
+              <h4>Installation</h4>
+
+              <div id="article_wrapper" class="article">
+
+                <div class="richtext">
+
+                  <h5 class="block">
+                    <a id="choosing_the_installation_mode" name="choosing_the_installation_mode">
+                      Choosing the installation mode
+                    </a>
+                  </h5>
+                  <p class="block">
+                    If you&#039;ve prepared your system for the backup, you can proceed with the installation. You must install the <em class="italic">Tar-LVM</em> tools on each host separately and there are two installation modes denoted as <em class="italic">all</em> and <em class="italic">one</em>.
+                  </p>
+                  <p class="block">
+                    The <strong class="bold"><em class="italic">all</em></strong> mode must be used on the machine or host where the <em class="italic">tar-lvm-all</em> script is invoked. That&#039;s either the machine to which the backup device is connected if it is accessed directly (i.e. not via <em class="italic">SSH</em>) or the host which triggers the network backup centrally for a set or subset of hosts via <em class="italic">tar-lvm-all</em>.
+                  </p>
+                  <p class="block">
+                    Using the <strong class="bold"><em class="italic">one</em></strong> installation mode is sufficient on all other physical or virtual hosts that are backing up via <em class="italic">SSH</em> and on the <em class="italic">KVM</em> virtual machines with direct access to the backup device connected to the physical machine.
+                  </p>
+                  <h5 class="block">
+                    <a id="information_to_both_modes" name="information_to_both_modes">
+                      Information to both modes
+                    </a>
+                  </h5>
+                  <p class="block">
+                    The installation script installs the binaries into the <span class="file">/usr/local/sbin</span> directory, configuration files into <span class="file">/usr/local/etc</span>, documentation into <span class="file">/usr/local/share/doc</span> and creates the required directory structure under <span class="file">/var/local</span>. Whereas older versions of the binaries are always overwritten, the original configuration files are kept untouched and the installed configuration files got the <code class="code">.new</code> suffix if the corresponding configuration files already exist.
+                  </p>
+                  <p class="block">
+                    Keep the installation archive just for case of future uninstallation. The <code class="code">install.sh</code> script itself contains the list of files and directories to install or uninstall for the <em class="italic">Tar-LVM</em> suite of certain version.
+                  </p>
+                  <h5 class="block">
+                    <a id="installation_of_the_whole_suite_the_all_mode" name="installation_of_the_whole_suite_the_all_mode">
+                      Installation of the whole suite - the all mode
+                    </a>
+                  </h5>
+                  <p class="block">
+                    The installation procedure is very simple. It&#039;s sufficient to download and extract the <em class="italic">Tar-LVM</em> installation archive and then run the included script <code class="code">install.sh</code>.
+                  </p>
+                  <p class="block">
+                    To install the whole suite, pass the <code class="code">all</code> argument to the installation script.
+                  </p>
+                  <div class="block">
+                    <div class="commands">
+                      <ul>
+                        <li>./install.sh install all</li>
+                      </ul>
+                    </div>
+                  </div>
+                  <h5 class="block">
+                    <a id="installation_for_a_single_host_or_machine_the_one_mode" name="installation_for_a_single_host_or_machine_the_one_mode">
+                      Installation for a single host or machine - the one mode
+                    </a>
+                  </h5>
+                  <p class="block">
+                    To install just the scripts for a single host or machine, pass the <code class="code">one</code> argument to the installation script.
+                  </p>
+                  <div class="block">
+                    <div class="commands">
+                      <ul>
+                        <li>./install.sh install one</li>
+                      </ul>
+                    </div>
+                  </div>
+
+                </div>
+
+              </div>
+
+              <p class="nomargin nopadding">&nbsp;</p>
+
+              <div class="cleaner">&nbsp;</div>
+            </div><!-- content -->
+
+          </div><!-- main1 -->
+
+        </div><!-- maincontainer1 -->
+
+        <div id="footer">
+
+          <div class="footer_middle">
+            <p class="block">
+              The contents of this page is distributed under the
+              <a href="http://www.gnu.org/licenses/fdl.html">GNU FDL</a>
+              license.
+            </p>
+          </div>
+
+        </div><!-- footer -->
+
+      </div><!-- wrapper -->
+
+    </div><!-- wrapper_outter -->
+
+  </body>
+
+
+</html>

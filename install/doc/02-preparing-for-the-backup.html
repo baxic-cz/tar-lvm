@@ -1,0 +1,342 @@
+<!DOCTYPE html
+     PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN"
+    "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="cs" lang="cs">
+
+
+  <head>
+
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+
+    <title>Preparing for the backup</title>
+
+  </head>
+
+
+  <body>
+
+    <div id="wrapper_outter">
+
+      <div id="wrapper">
+
+        <div id="maincontainer1">
+
+          <div id="main1">
+
+            <div id="title">
+
+              <h3>Tar-LVM</h3>
+              
+            </div><!-- title -->
+
+            <div id="content">
+
+              <h4>Preparing for the backup</h4>
+
+              <div id="article_wrapper" class="article">
+
+                <div class="richtext">
+
+                  <h5 class="block">
+                    <a id="choosing_destination_backup_storage" name="choosing_destination_backup_storage">
+                      Choosing destination backup storage
+                    </a>
+                  </h5>
+                  <p class="block">
+                    <em class="italic">Tar-LVM</em> suite is able to store the backups either via <em class="italic">SSH</em> or to any local device connected to one of the machines. Moreover, the device can be connected to one of the physical machines with <em class="italic">KVM</em> virtualization and attached to its virtual machines during their backup. Both possibilities can be combined together.
+                  </p>
+                  <p class="block">
+                    The scheme is depicted on the following figure.
+                  </p>
+                  <div class="block">
+                    <div class="picture_wrapper">
+                      <table class="picture_box center_block" cellspacing="0" cellpadding="0" border="0">
+                        <tr>
+                          <td>
+                            <img class="picture" src="tar-lvm-deployment-scheme.png" alt="Deployment scheme of Tar-LVM tool" />
+                          </td>
+                        </tr>
+                      </table>
+                    </div>
+                  </div>
+                  <p class="block">
+                    The created archives and logs are thus written directly to the mounted backup device or to the <em class="italic">SSHFS</em> network filesystem using the <em class="italic">SFTP</em> protocol.
+                    However, bare in mind that the direct access method for storing the backups can be used just for a single physical machine and its <em class="italic">KVM</em> virtual machines, all other hosts (either physical or virtual) must use <em class="italic">SSHFS</em> if they want to store the archives and logs to the same storage.
+                  </p>
+                  <p class="block">
+                    This means that the backup destination can be a network storage accessible via <em class="italic">SSH</em> (e.g. a <em class="italic">NAS</em>) or any device directly connected to one of the physical machines with <em class="italic">Linux</em> (such a a large <em class="italic">RAID</em> array or simply a hard drive).
+                  </p>
+                  <p class="block">
+                    There&#039;s one more viewpoint that should be taken into account when choosing the backup storage. If it is intended to be accessed directly from one physical machine and its <em class="italic">KVM</em> virtual machines, then the <em class="italic">Tar-LVM</em> suite must be triggered from that physical machine to be able to attach the backup device to each machine sequentially and not concurrently. All other hosts using the <em class="italic">SSH</em> access method can be then backed up in parallel and the backup process may be triggered from the physical machine as well, from each backed-up host or from any other host.
+                  </p>
+                  <h5 class="block">
+                    <a id="backup_host_filesystem_prereguisities" name="backup_host_filesystem_prereguisities">
+                      Backup host filesystem prereguisities
+                    </a>
+                  </h5>
+                  <p class="block">
+                    If you want to achieve minimal downtime of your services and still be able to create consistent backup of a snapshot of whole operating system, most of its filesystems must be located on <em class="italic">LVM</em> devices with suitable layout. The reason is simple. If a snapshot of a running system is to be created, all filesystems must be remounted read-only during the snapshot creation and those that are not located on <em class="italic">LVM</em> and thus are unable to create snapshots, must stay remounted read-only during the whole backup process.
+                  </p>
+                  <p class="block">
+                    This idea is expressed on the following figure.
+                  </p>
+                  <div class="block">
+                    <div class="picture_wrapper">
+                      <table class="picture_box center_block" cellspacing="0" cellpadding="0" border="0">
+                        <tr>
+                          <td>
+                            <img class="picture" src="tar-lvm-filesystem-prerequisities.png" alt="Scheme of Tar-LVM filesystem prerequisities" />
+                          </td>
+                        </tr>
+                      </table>
+                    </div>
+                  </div>
+                  <p class="block">
+                    As you can see and as it was mentioned above, all fileystems don&#039;t have to be necessarily created on LVM volumes. Those of them that are mounted read-only during normal operation (i.e. most of the time - except maintenance) don&#039;t need to meet this condition.
+                  </p>
+                  <p class="block">
+                    Depending on your filesystem layout, those are usually filesystems mounted to the <em class="italic">/boot</em> or <em class="italic">/usr</em> directories and even the root filesystem <em class="italic">/</em> itself can stay read-only most of the time if there are separate partitions or volumes for writable locations like <em class="italic">/var</em>, <em class="italic">/srv</em>, <em class="italic">/opt</em> etc. The <em class="italic">/dev</em> or <em class="italic">/run</em> (<em class="italic">/var/run</em>) directories are nowadays usually located in memory.
+                  </p>
+                  <p class="block">
+                    <em class="important">However, there&#039;s an important condition if the backups should be triggered automatically by the <em class="italic">Cron</em> scheduler. In that case, the <em class="italic">/tmp</em> directory must stay writable during archiving.</em> This isn&#039;t luckily any issue, because the temporary files are usually deleted when the operating system starts. And that&#039;s the case after restoring whole system as well. There&#039;s therefore no need to backup the <em class="italic">/tmp</em> or <em class="italic">/var/tmp</em> filesystems.
+                  </p>
+                  <p class="block">
+                    Let&#039;s look at two examples of the filesystem layout. The first layout contains many separate filesystems and most of them are located on <em class="italic">LVM</em>. Even those that can be mounted read-only during normal operation such as the <em class="italic">/usr</em> or <em class="italic">/</em> filesystems. The <em class="italic">LVM</em> read-only filesystems can be safely remounted read-write during the backup after their snapshots are created.
+                  </p>
+                  <div class="block">
+                    <table class="center_block" border="1" cellspacing="0">
+                      <tr>
+                        <th>mountpoint</th><th>LVM</th><th>read-only</th>
+                      </tr>
+                      <tr>
+                        <td>/</td><td>LVM</td><td>ro</td>
+                      </tr>
+                      <tr>
+                        <td>/boot</td><td>-</td><td>ro</td>
+                      </tr>
+                      <tr>
+                        <td>/usr</td><td>LVM</td><td>ro</td>
+                      </tr>
+                      <tr>
+                        <td>/var</td><td>LVM</td><td>rw</td>
+                      </tr>
+                      <tr>
+                        <td>/tmp</td><td>LVM</td><td>rw</td>
+                      </tr>
+                      <tr>
+                        <td>/var/tmp</td><td>LVM</td><td>rw</td>
+                      </tr>
+                      <tr>
+                        <td>/var/mail</td><td>LVM</td><td>rw</td>
+                      </tr>
+                      <tr>
+                        <td>/srv</td><td>LVM</td><td>rw</td>
+                      </tr>
+                      <tr>
+                        <td>/opt</td><td>LVM</td><td>rw</td>
+                      </tr>
+                      <tr>
+                        <td>/home</td><td>LVM</td><td>rw</td>
+                      </tr>
+                    </table>
+                  </div>
+                  <p class="block">
+                    On the contrary, the second example layout contains as few filesystems as possible for the <em class="italic">Tar-LVM</em> backup to operate properly and none of them are on <em class="italic">LVM</em>.
+                  </p>
+                  <div class="block">
+                    <table class="center_block" border="1" cellspacing="0">
+                      <tr>
+                        <th>mountpoint</th><th>LVM</th><th>read-only</th>
+                      </tr>
+                      <tr>
+                        <td>/</td><td>-</td><td>rw</td>
+                      </tr>
+                      <tr>
+                        <td>/boot</td><td>-</td><td>ro</td>
+                      </tr>
+                      <tr>
+                        <td>/tmp</td><td>-</td><td>rw</td>
+                      </tr>
+                    </table>
+                  </div>
+                  <p class="block">
+                    The advantage of the first layout is obviously the fact that the downtime of services provided by the backed-up host is minimal. It&#039;s necessary just to stop most services, remount filesystems read-only, create snapshots, remount filesystems back read-write and the services may be started again after that because the read-only filesystems and frozen snapshots are being backed-up. The second layout enforces remounting the root <em class="italic">/</em> filesystem read-only during the whole backup which necessitates shutting down most services during the whole period.
+                  </p>
+                  <p class="block">
+                    The topic of partitioning the system is behind the scope of this document. If you want to know more about the reasons of creating several separate partitions, see the document <a href="https://www.debian.org/doc/manuals/securing-debian-howto/">Securing Debian Manual</a>, especially its parts <em class="italic">Partitioning the system</em> and <em class="italic">Mounting the partitions the right way</em>.
+                  </p>
+                  <h5 class="block">
+                    <a id="configuring_mail_delivery" name="configuring_mail_delivery">
+                      Configuring mail delivery
+                    </a>
+                  </h5>
+                  <p class="block">
+                    If you want to automate the backups, i.e. invoke the backup commands from the <em class="italic">Cron</em> scheduler, or if you want to trigger the backup centrally from one point for the whole set of hosts (or potentially from more points for a few subsets of hosts) by using <em class="italic">tar-lvm-all</em>, you need to have your mail system configured properly on all hosts running the backup scripts. <em class="italic">Cron</em> must be able to deliver potential errors that cannot be written to the logs (e.g. if the backup storage isn&#039;t mounted yet) or do not belong there. And the same applies for the <em class="italic">tar-lvm-one</em> scripts invoked on each host by the <em class="italic">tar-lvm-all</em> script running centrally - some errors can be delivered just by email.
+                  </p>
+                  <p class="block">
+                    The <em class="italic">tar-lvm-all</em> script can be configured to instruct the backup scripts on each host not to use local <em class="italic">MTA</em>, but directly the <em class="italic">SMTP</em> protocol to connect to some mail server, but that&#039;s not the preferred solution. If the delivery fails, there&#039;s neither a way how to inform about the error nor any later repeated delivery attempt. The error output can get lost easily.
+                  </p>
+                  <p class="block">
+                    The simplest configuration of the whole mail system could be implemented as follows. Let&#039;s configure one host as the destination host for your email domain - either with separate mailboxes or with a catch-all mailbox depending on your needs. All other hosts could be configured to relay everything excluding mails to root to the destination server prepared earlier. This can be achieved relatively easily by using <em class="italic">Postfix</em>, for instance. If it is in default configuration that delivers emails to local mailboxes, it should be sufficient to add or update just a few configuration directives in the <span class="file">/etc/postfix/main.cf</span> file.
+                  </p>
+                  <p class="block">
+                    A very simple example of <em class="italic">Postfix</em> directives to update on the mail destination host follows:
+                  </p>
+                  <div class="block">
+                    <div class="contents">
+                      <ul>
+                        <li>myhostname = smtp.domain.org</li>
+                        <li>myorigin = domain.org</li>
+                        <li>mydestination = domain.org smtp.domain.org localhost</li>
+                        <li>mynetworks =</li>
+                        <li>relayhost =</li>
+                      </ul>
+                    </div>
+                  </div>
+                  <p class="block">
+                    And now a very simple example for the host to backup:
+                  </p>
+                  <div class="block">
+                    <div class="contents">
+                      <ul>
+                        <li>myhostname = hostN.domain.org</li>
+                        <li>myorigin = domain.org</li>
+                        <li>mydestination =</li>
+                        <li>mynetworks = 127.0.0.1/32</li>
+                        <li>relayhost = [smtp.domain.org]</li>
+                      </ul>
+                    </div>
+                  </div>
+                  <p class="block">
+                    If you always want to keep mails to the <em class="italic">localhost</em> and <em class="italic">hostN.domain.org</em> domains locally, modify <code class="code">mydestination</code> as follows:
+                  </p>
+                  <div class="block">
+                    <div class="contents">
+                      <ul>
+                        <li>mydestination = hostN.domain.og localhost</li>
+                      </ul>
+                    </div>
+                  </div>
+                  <p class="block">
+                    All emails to the <em class="italic">root</em> user can be then kept on the host by creating the file <span class="file">/etc/postfix/virtual</span> with the following content:
+                  </p>
+                  <div class="block">
+                    <div class="contents">
+                      <ul>
+                        <li>root root@localhost</li>
+                      </ul>
+                    </div>
+                  </div>
+                  <p class="block">
+                    This change can be activated by invoking:
+                  </p>
+                  <div class="block">
+                    <div class="commands">
+                      <ul>
+                        <li>postmap /etc/postfix/virtual</li>
+                      </ul>
+                    </div>
+                  </div>
+                  <p class="block">
+                    And by adding virtual alias map directive to the <span class="file">main.cf</span> configuration file.
+                  </p>
+                  <div class="block">
+                    <div class="contents">
+                      <ul>
+                        <li>virtual_alias_maps = hash:/etc/postfix/virtual</li>
+                      </ul>
+                    </div>
+                  </div>
+                  <p class="block">
+                    The servers shouldn&#039;t be opened for relaying using the described configuation, but it&#039;s wise to double-check and test your configuration to avoid this security issue.
+                  </p>
+                  <h5 class="block">
+                    <a id="setting_up_ssh_authentication" name="setting_up_ssh_authentication">
+                      Setting up SSH authentication
+                    </a>
+                  </h5>
+                  <p class="block">
+                    If the <em class="italic">Tar-LVM</em> scripts need to communicate with other hosts, they use the <em class="italic">SSH</em> protocol and they authenticate with <em class="italic">SSH</em> public key authentication. Such remote access is currently used in three different ways.
+                  </p>
+                  <div class="block">
+                    <div class="list">
+                      <ul>
+                        <li>If the host being backed up stores the archives and logs to remote <em class="italic">SSH</em> storage, it uses the <em class="italic">SSHFS</em> protocol based on <em class="italic">SFTP</em>.</li>
+                        <li>If the backup is triggered centrally for the whole set of hosts (or a few subsets) using <em class="italic">tar-lvm-all</em>, the backups are triggered and controlled via <em class="italic">SSH</em> on each host.</li>
+                        <li>If the <em class="italic">tar-lvm-one</em> script for backing up one host uses shared configuration, this configuration is obtained from the shared location via <em class="italic">SSH</em>.</li>
+                      </ul>
+                    </div>
+                  </div>
+                  <p class="block">
+                    Authentication and authorization is always based on <em class="italic">SSH</em> public key authentication as mentioned earlier. This kind of authentication must be allowed on the server side by using the <code class="code">PubkeyAuthentication</code> directive in the configuration file of the <em class="italic">sshd</em> daemon (e.g. in <span class="file">/etc/ssh/sshd_config</span>).
+                  </p>
+                  <div class="block">
+                    <div class="contents">
+                      <ul>
+                        <li>PubkeyAuthenticaton yes</li>
+                      </ul>
+                    </div>
+                  </div>
+                  <p class="block">
+                    It can be also left out, because that&#039;s usually the default setting.
+                  </p>
+                  <p class="block">
+                    Configuration on the client side doesn&#039;t have to allow this kind of authentication - see the <code class="code">PubkeyAuthentication</code> directive again in the configuration file of the <em class="italic">ssh</em> client (e.g. <span class="file">/etc/ssh/ssh_config</span>). If it is set to <code class="code">no</code>, it can be changed in the user&#039;s configuration file located in his home directory or directly on the command-line.
+                  </p>
+                  <div class="block">
+                    <div class="commands">
+                      <ul>
+                        <li>ssh -o PubkeyAuthentication=yes user@server</li>
+                      </ul>
+                    </div>
+                  </div>
+                  <p class="block">
+                    If public key authentication is allowed on both client and server side, a public/private key pair must be generated on the client side for correct user by using the <code class="code">ssh-keygen</code> command. Ensure that you are logged in as the connecting user and don&#039;t protect the private key by any passphrase, because it is going to be used non-interactively.
+                  </p>
+                  <div class="block">
+                    <div class="commands">
+                      <ul>
+                        <li>ssh-keygen</li>
+                      </ul>
+                    </div>
+                  </div>
+                  <p class="block">
+                    After that place the generated public key (i.e. the contents of the file <span class="file">~/.ssh/id_rsa.pub</span> on the client side) as a new line to the file <span class="file">~/.ssh/authorized_keys</span> on the server side. Check again that you are working under the correct destination user account on the server side.
+                  </p>
+                  <p class="block">
+                    Your SSH access shouldn&#039;t require any password now, even if it is very well protected. If it still asks for one, check the permissions on the <span class="file">~/.ssh</span> directory that should be set to 700 or eventually on the file <span class="file">~/.ssh/authorized_keys</span> where 644 should be sufficient.
+                  </p>
+
+                </div>
+
+              </div>
+
+              <p class="nomargin nopadding">&nbsp;</p>
+
+              <div class="cleaner">&nbsp;</div>
+            </div><!-- content -->
+
+          </div><!-- main1 -->
+
+        </div><!-- maincontainer1 -->
+
+        <div id="footer">
+
+          <div class="footer_middle">
+            <p class="block">
+              The contents of this page is distributed under the
+              <a href="http://www.gnu.org/licenses/fdl.html">GNU FDL</a>
+              license.
+            </p>
+          </div>
+
+        </div><!-- footer -->
+
+      </div><!-- wrapper -->
+
+    </div><!-- wrapper_outter -->
+
+  </body>
+
+
+</html>

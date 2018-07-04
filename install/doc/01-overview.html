@@ -1,0 +1,134 @@
+<!DOCTYPE html
+     PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN"
+    "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="cs" lang="cs">
+
+
+  <head>
+
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+
+    <title>Overview</title>
+
+  </head>
+
+
+  <body>
+
+    <div id="wrapper_outter">
+
+      <div id="wrapper">
+
+        <div id="maincontainer1">
+
+          <div id="main1">
+
+            <div id="title">
+
+              <h3>Tar-LVM</h3>
+              
+            </div><!-- title -->
+
+            <div id="content">
+
+              <h4>Overview</h4>
+
+              <div id="article_wrapper" class="article">
+
+                <div class="richtext">
+
+                  <h5 class="block">
+                    <a id="introduction" name="introduction">
+                      Introduction
+                    </a>
+                  </h5>
+                  <p class="block">
+                    The <strong class="bold"><em class="italic">Tar-LVM</em></strong> suite is a set of <em class="italic">Bash</em> scripts that facilitates backing up <em class="italic">Linux</em> operating systems using <a href="https://www.gnu.org/software/tar/">GNU Tar</a>. It is designed to perform consistent backups of the whole operating systems by creating snapshots of their filesystems either by using <em class="italic">LVM</em> or by remounting <em class="italic">non-LVM</em> filesystems read-only during the backup. The <em class="italic">Tar-LVM</em> tools can be thus invoked while the systems are running with minimal downtime of most services that is necessary for creating the snapshots. Because <strong class="bold"><em class="italic">GNU tar</em></strong> is used as the archiving tool, the backups are done on the filesystem basis, i.e. from inside of the running systems.
+                  </p>
+                  <p class="block">
+                    <em class="italic">Tar-LVM</em> is able to store the result compressed archives to a remote network storage accessible just via <strong class="bold"><em class="italic">SSH</em></strong>, e.g. to a <em class="italic">NAS</em>, to a server with a large <em class="italic">RAID</em> array or simply to a chosen <strong class="bold">local device</strong> if backing up a single host (e.g. a <em class="italic">Linux</em> workstation). Moreover, it also offers the possibility to be invoked on a physical server with the <em class="italic">Linux</em> native <strong class="bold"><em class="italic">KVM</em></strong> virtualization and attach the backup device to each virtual machine during its backup. The backup device must be connected to the physical machine in that case.
+                  </p>
+                  <h5 class="block">
+                    <a id="deployment_scheme" name="deployment_scheme">
+                      Deployment scheme
+                    </a>
+                  </h5>
+                  <p class="block">
+                    As mentioned above, the <em class="italic">Tar-LVM</em> tools can be used to backup chosen <em class="italic">Linux</em> hosts over network to a network storage via <em class="italic">SSH</em>. The destination data storage can be a standalone system such as a <em class="italic">NAS</em> or a device connected to one of the machines (e.g. a <em class="italic">RAID</em> array or simply large hard disk).
+                  </p>
+                  <p class="block">
+                    The scheme is depicted on the following figure.
+                  </p>
+                  <div class="block">
+                    <div class="picture_wrapper">
+                      <table class="picture_box center_block" cellspacing="0" cellpadding="0" border="0">
+                        <tr>
+                          <td>
+                            <img class="picture" src="tar-lvm-deployment-scheme.png" alt="Deployment scheme of Tar-LVM tool" />
+                          </td>
+                        </tr>
+                      </table>
+                    </div>
+                  </div>
+                  <p class="block">
+                    As you can see, it is possible to backup whole physical hosts with virtualization (tested with <em class="italic">KVM</em>), virtual hosts or separate hosts. The network backup can be run in parallel and it is possible to specify maximal number of parallel backups per each trigger point, i.e. per node which triggers the backup for a subset of hosts.
+                  </p>
+                  <h5 class="block">
+                    <a id="main_features" name="main_features">
+                      Main features
+                    </a>
+                  </h5>
+                  <div class="block">
+                    <div class="list">
+                      <ul>
+                        <li>consistent backup of a snapshot of each operating system</li>
+                        <li>short downtime of all services if <em class="italic">LVM</em> volume layout is suitable</li>
+                        <li>consistent operating system backup even without <em class="italic">LVM</em>, but with long downtime period covering whole backup</li>
+                        <li>network backup over <em class="italic">SSH</em> and/or local backup to any device attached to the machine or to the physical machine in case of <em class="italic">KVM</em> virtualization</li>
+                        <li>backup from inside of running operating systems</li>
+                        <li>support of any filesystem fully supported by <em class="italic">GNU tar</em> including <em class="italic">POSIX ACLs</em> (tested with <em class="italic">ext2</em>, <em class="italic">ext3</em>, <em class="italic">ext4</em>, <em class="italic">xfs</em> and <em class="italic">btrfs</em>)</li>
+                        <li>support of both full and incremental backups</li>
+                        <li>encrypted network communication</li>
+                        <li>optionally encrypted backup device with <em class="italic">LUKS</em>, but no support of encrypted archives</li>
+                        <li>parallel network backups with maximal number of backups running concurrently</li>
+                        <li>network backups triggered from chosen number of points, e.g. centrally from one point, from several points or from each backup node</li>
+                        <li>log output to files on the target storage and sent by mail</li>
+                        <li>separate detection of backup errors by using the check mode with backup result analysis</li>
+                        <li>designed to be run automatically from cron</li>
+                      </ul>
+                    </div>
+                  </div>
+
+                </div>
+
+              </div>
+
+              <p class="nomargin nopadding">&nbsp;</p>
+
+              <div class="cleaner">&nbsp;</div>
+            </div><!-- content -->
+
+          </div><!-- main1 -->
+
+        </div><!-- maincontainer1 -->
+
+        <div id="footer">
+
+          <div class="footer_middle">
+            <p class="block">
+              The contents of this page is distributed under the
+              <a href="http://www.gnu.org/licenses/fdl.html">GNU FDL</a>
+              license.
+            </p>
+          </div>
+
+        </div><!-- footer -->
+
+      </div><!-- wrapper -->
+
+    </div><!-- wrapper_outter -->
+
+  </body>
+
+
+</html>

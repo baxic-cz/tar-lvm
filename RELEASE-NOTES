@@ -1,0 +1,11 @@
+  tar-lvm-all 00.21 - ssh agent support added
+  tar-lvm-one 00.21 - ssh agent support added
+  ssd-backup 00.21 - bug fix - Additional characters prevented the script
+                               to run (typo).
+00.80   - Initial version of the Tar-LVM suite released.
+  bgrun 00.20
+  cmdsend 00.20
+  ssd-backup 00.20
+  tar-lvm 00.20
+  tar-lvm-one 00.20
+  tar-lvm-all 00.20

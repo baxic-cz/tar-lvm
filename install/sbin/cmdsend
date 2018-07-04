@@ -1,0 +1,447 @@
+#!/bin/bash
+
+###############################################################################
+#
+# script: cmdsend
+# author: Lukas Baxa alias Baxic <baxic-cs@seznam.cz>
+#
+# This script is free software; you can redistribute it and/or modify it
+# under the terms of the GNU General Public License as published by the
+# Free Software Foundation; either version 3, or (at your option) any later
+# version.
+#
+###############################################################################
+
+
+PROGNAME='cmdsend'
+PNSPACES='       '
+
+# set versions
+SCRIPT_VERSION='00.20'
+SUITE_VERSION='00.80'
+
+# set directories and names
+TMPDIR="/tmp/$PROGNAME"
+
+TMPDIR_PID="$TMPDIR/p$$"
+OUTFILE="$TMPDIR_PID/$PROGNAME.$$.out"
+LOGFILE="$TMPDIR_PID/$PROGNAME.$$.log"
+
+TMPDIR_TIME="$TMPDIR/t$(date '+%Y-%m-%d_%H-%M-%S')"
+TMPDIR_KEEPPERIOD=14
+
+
+# check_tools() tool1 ... toolN
+#   check if all the external tools tool1 ... toolN are available on the system
+# return: exit - some of the tools are missing
+#         0 - ok
+check_tools() {
+
+    local fail fst
+    local tool
+    
+    if ! which which >/dev/null 2>&1; then
+        echo "$PROGNAME: cannot find the 'which' command that is necessary" >&2
+        exit 1
+    fi
+
+    fail=1
+    fst=0
+    for tool in "$@"; do
+        if ! which "$tool" >/dev/null 2>&1; then
+            if [[ "$fst" = 0 ]]; then
+                echo "$PROGNAME: cannot find the following tools/commands that are necessary" >&2
+                fst=1
+            fi
+            echo "  '$tool'" >&2
+            fail=0
+        fi
+    done
+
+    [[ "$fail" = 0 ]] && exit 1
+    return 0
+
+}
+
+
+# usage() [exit_code]
+#   print the usage info and exit with given exit code (default 0)
+# return: exit
+usage() {
+
+    local ec="${1:-0}"
+    if [[ "$ec" != 0 ]]; then
+        exec >&2
+    fi
+
+    echo "$PROGNAME - run process and send its output by mail"
+    echo
+    echo "    ($PROGNAME version: $SCRIPT_VERSION, tar-lvm suite version: $SUITE_VERSION)"    
+    echo
+    echo "usage: $PROGNAME -h"
+    echo "       $PROGNAME [ [[FROM-ADDR] smtp[-tls|s]://[USER:PASS@]SERVER[:PORT]] \\"
+    echo "       $PNSPACES TO-ADDR-1 ... ] -- COMMAND [ARGUMENTS]"
+    echo
+
+    exit "$ec"
+
+}
+
+
+# parse_args() arg1 ... argN
+#   parse the command-line arguments and set the global variables FROM_ADDR,
+#   SMTP_SERVER, SMTP_PORT, TO_ADDRS and COMMAND
+# return: exit - wrong arguments are given
+#         0 - ok
+parse_args() {
+
+    local arg
+    local hyphens=''
+
+    unset FROM_ADDR
+    unset SMTP_PROTO
+    unset SMTP_SERVER
+    unset SMTP_PORT
+    unset SMTP_USER
+    unset SMTP_PASS
+    unset TO_ADDRS
+    unset COMMAND
+
+    [[ $# -eq 1 && "$1" = '-h' ]] && usage
+    [[ $# -lt 2 ]] && usage 1
+    
+    arg=''
+    if [[ "$1" != '--' ]]; then
+	if echo "$1" | grep -q '://'; then
+	    arg="$1"
+	    shift
+	elif echo "$2" | grep -q '://'; then
+	    FROM_ADDR="$1"
+	    arg="$2"
+	    shift 2
+	fi
+    fi
+    
+    if [[ -n "$arg" ]]; then
+	SMTP_SERVER="$(echo "$arg" | sed -rn 's#^smtp(-tls|s)?://([^:]+:[^@]+@)?([[:alnum:].]+)(:[[:digit:]]+)?$#\3#p')"
+	SMTP_PORT="$(echo "$arg" | sed -rn 's#^smtp(-tls|s)?://([^:]+:[^@]+@)?[[:alnum:].]+(:([[:digit:]]+))?$#\4#p')"
+	SMTP_PROTO="$(echo "$arg" | sed -rn 's#^(smtp(-tls|s)?)://([^:]+:[^@]+@)?[[:alnum:].]+(:[[:digit:]]+)?$#\1#p')"
+	SMTP_USER="$(echo "$arg" | sed -rn 's#^smtp(-tls|s)?://(([^:]+):[^@]+@)?[[:alnum:].]+(:[[:digit:]]+)?$#\3#p')"
+	SMTP_PASS="$(echo "$arg" | sed -rn 's#^smtp(-tls|s)?://([^:]+:([^@]+)@)?[[:alnum:].]+(:[[:digit:]]+)?$#\3#p')"
+	[[ -z "$SMTP_SERVER" ]] && usage 1
+	[[ ( -z "$SMTP_USER" && -n "$SMTP_PASS" ) \
+	       || ( -n "$SMTP_USER" && -z "$SMTP_PASS" ) ]] && usage 1
+	if [[ -z "$SMTP_PORT" ]]; then
+	    if [[ "$SMTP_PROTO" = 'smtps' ]]; then
+		SMTP_PORT=465
+	    elif  [[ "$SMTP_PROTO" = 'smtp-tls' ]]; then
+		SMTP_PORT=587
+	    else
+		SMTP_PORT=25
+	    fi
+	fi
+    fi
+
+    for arg in "$@"; do
+
+	if [[ -z "$hyphens" && "$arg" = '--' ]]; then
+	    hyphens='y'
+	    continue
+	fi
+	
+	
+	if [[ -z "$hyphens" ]]; then
+	    echo "$arg" | grep -q '^[[:blank:]]*$' && usage 1
+	    
+	    TO_ADDRS[${#TO_ADDRS[@]}]="$arg"
+	else
+	    [[ ${#COMMAND[@]} -eq 0 ]] \
+		&& echo "$arg" | grep -q '^[[:blank:]]*$' \
+		&& usage 1
+	    
+	    COMMAND[${#COMMAND[@]}]="$arg"	    
+	fi
+
+    done
+
+    [[ -z "$hyphens" ]] && usage 1
+    [[ ${#COMMAND[@]} -eq 0 ]] && usage 1
+    [[ ${#TO_ADDRS[@]} -eq 0 && -n "$SMTP_SERVER" ]] && usage 1
+    [[ -z "$SMTP_SERVER" && -n "$FROM_ADDR" ]] && usage 1
+
+    return 0
+    
+}
+
+
+# check_addon_tools()
+#   check if add-on tools that are necessary for proper operation are present
+#   in the system, the specific tools depend on given script arguments
+#   or configuration
+# return: exit - some of the tools are missing
+#         0 - ok
+check_addon_tools() {
+
+    local ec=0
+
+    unset MAIL_COMMAND
+
+    if [[ -n "$SMTP_SERVER" ]]; then
+
+	if [[ "$SMTP_PROTO" = 'smtps' || "$SMTP_PROTO" = 'smtp-tls' ]]; then
+
+            if ! which openssl >/dev/null 2>&1; then
+		echo "$PROGNAME: 'openssl' binary not found and SMTPS/SMTP-TLS server specified" >&2
+		ec=1
+            fi
+
+	else
+
+            if ! which telnet >/dev/null 2>&1; then
+		echo "$PROGNAME: 'telnet' binary not found and SMTP server spec
+ified" >&2
+		ec=1
+            fi
+
+	fi
+
+	if [[ -n "$SMTP_USER" ]]; then
+            if ! which base64 >/dev/null 2>&1; then
+		echo "$PROGNAME: 'base64' binary not found and SMTP user specified" >&2
+		ec=1
+            fi
+	fi
+	
+    else
+
+        if which mailx >/dev/null 2>&1; then
+	    MAIL_COMMAND='mailx'
+	elif which mail >/dev/null 2>&1; then
+	    MAIL_COMMAND='mail'
+	else
+            echo "$PROGNAME: neither 'mailx' nor 'mail' binary found and" >&2
+	    echo "$PNSPACES  SMTP server not specified" >&2
+	    ec=1
+        fi	
+	
+    fi
+
+    [[ "$ec" -ne 0 ]] && exit "$ec"
+    return 0
+    
+}
+
+
+# delete_piddirs()
+#   delete all stale temporary piddirs/timestamped directories (timestamped
+#   dirs are piddirs whose scripts have finished properly)
+# return: 0 - ok
+delete_piddirs() {
+
+    local pidf pid
+    local tsf tsd tst staledate tsdate
+
+    # delete all stale pid directories whose processes aren't running anymore
+    ls -1 "$TMPDIR" | grep '^p' | \
+	while read pidf; do
+	    pid="$(echo "$pidf" | sed -rn 's#^p([[:digit:]]+)$#\1#p')"
+	    if [[ -n "$pid" ]]; then
+		[[ "$(ps -p "$pid" -o 'comm=')" = "$PROGNAME" ]] && continue
+		rm -fr "$TMPDIR/$pidf"
+	    fi
+	done
+
+
+    # delete all stale timestamped directories
+    ls -1 "$TMPDIR" | grep '^t' | \
+	while read tsf; do
+	    tsd="$(echo "$tsf" | sed -rn 's#^t([[:digit:]]{4}-[[:digit:]]{2}-[[:digit:]]{2})_.*$#\1#p')"
+	    tst="$(echo "$tsf" | sed -rn 's#^t.*_([[:digit:]]{2}-[[:digit:]]{2}-[[:digit:]]{2})$#\1#p' | tr '-' ':')"
+	    if [[ -n "$tsd" && -n "$tst" ]]; then
+		staledate="$(date -d "$TMPDIR_KEEPPERIOD days ago" '+%s')"
+		tsdate="$(date -d "$tsd $tst" '+%s')"
+		[[ "$tsdate" -lt "$staledate" ]] && rm -fr "$TMPDIR/$tsf"
+	    fi
+	done
+
+    return 0
+    
+}
+
+
+# send_mail subject
+#   send mail with given subject to email addresses specified in the TO_ADDRS
+#   array using telnet if SMTP_SERVER is specified or using mail or mailx
+#   command (whichever is available) if no smtp server was specified (and
+#   thus using local MTA), mail body is taken from standard input
+# return: 0 - ok
+#         1 - mailx failed (no smtp server specified)
+#         2 - openssl or telnet failed (smtp server specified)
+send_mail() {
+
+    local subject="$1"
+    local from rcpt
+    local ec=0
+
+    if [[ -z "$SMTP_SERVER" ]]; then
+
+	"$MAIL_COMMAND" -s "$subject" "${TO_ADDRS[@]}"
+	[[ $? -ne 0 ]] && ec=1
+	
+    else
+
+	from="$(id -un)"
+	[[ -n "$FROM_ADDR" ]] && from="$FROM_ADDR"
+	
+	(
+	    sleep 2
+
+	    echo "ehlo $(hostname -f)"
+	    sleep 1
+	    if [[ -n "$SMTP_USER" ]]; then
+		echo "auth login"
+		sleep 1
+		echo "$(echo -n "$SMTP_USER" | base64)"
+		sleep 1
+		echo "$(echo -n "$SMTP_PASS" | base64)"
+		sleep 1
+	    fi
+	    echo "mail from: <$from>"
+	    sleep 1
+	    for rcpt in "${TO_ADDRS[@]}"; do		
+		echo "rcpt to: <$rcpt>"
+		sleep 1
+	    done
+	    echo 'data'
+	    sleep 1
+	    echo "From: $from"
+	    echo "To: $(echo "${TO_ADDRS[@]}" | sed -r 's#[[:blank:]]+# #g' | tr ' ' ',')\r\n"
+	    echo "Subject: $subject"
+	    echo "Date: $(date --rfc-2822)"
+	    echo
+	    cat
+	    echo -ne '\n.\n'
+	    sleep 1
+	    echo 'quit'
+
+	    sleep 2
+	) \
+	    | if [[ "$SMTP_PROTO" = 'smtps' ]]; then
+		  openssl s_client -quiet -crlf -ign_eof \
+			  -connect "$SMTP_SERVER:$SMTP_PORT"
+	      elif [[ "$SMTP_PROTO" = 'smtp-tls' ]]; then
+		  openssl s_client -quiet -starttls smtp -crlf -ign_eof \
+			  -connect "$SMTP_SERVER:$SMTP_PORT"
+	      else
+		  telnet "$SMTP_SERVER" "$SMTP_PORT"
+	      fi
+
+	if grep -q '^[45][0-9][0-9][^0-9]' "$LOGFILE"; then
+	    ec=2
+	fi
+	
+	if [[ "$(grep '^[23][0-9][0-9][^0-9]' "$LOGFILE" | wc -l)" -lt 9 ]]; then
+	    ec=2
+	fi
+	
+    fi
+
+    return "$ec"
+    
+}
+
+
+###### MAIN ###################################################################
+
+# check if all the external tools are available on the system
+check_tools grep sed ls ps rm date cat mkdir awk mv rmdir
+
+# parse and check arguments
+parse_args "$@"
+
+# check add-on tools that are dependent on given args
+check_addon_tools
+
+
+# delete old tmp directory if it exists
+if [[ -e "$TMPDIR_PID" ]]; then
+    rm -fr "$TMPDIR_PID"
+    if [[ $? -ne 0 ]]; then
+	echo "$PROGNAME: cannot delete '$TMPDIR_PID'" >&2
+	exit 2
+    fi
+fi
+
+# delete stale pid directories
+delete_piddirs
+
+# create new tmp directory
+mkdir -p "$TMPDIR_PID"
+if [[ $? -ne 0 ]]; then
+    echo "$PROGNAME: cannot create directory '$TMPDIR_PID'" >&2
+    exit 2
+fi
+
+
+# redirect stdout and stderr to a file
+rm -f "$OUTFILE" "$LOGFILE"
+if [[ $? -ne 0 ]]; then
+    echo "$PROGNAME: cannot delete outdated file '$OUTFILE'" >&2
+    exit 2
+fi
+
+exec >"$OUTFILE" 2>&1
+if [[ $? -ne 0 ]]; then
+    echo "$PROGNAME: cannot redirect output and errors to '$OUTFILE'" >&2
+    exit 2
+fi
+
+
+# run the specified command
+"${COMMAND[@]}"
+
+
+# redirect stdout and stderr to logfile now
+exec >"$LOGFILE" 2>&1
+
+
+# check if the process generated some output or errors, if so send it by mail
+OUTSIZE="$(ls -l "$OUTFILE" | awk '{print $5;}')"
+if [[ -r "$OUTFILE" && "$OUTSIZE" != 0 && "${#TO_ADDRS[@]}" != 0 ]]; then
+    (echo "> ${COMMAND[@]}"; cat "$OUTFILE") | send_mail "$PROGNAME at $(hostname -f)"
+    if [[ $? -ne 0 ]]; then
+	# error message printed to OUTFILE again, the original stdout and
+	# stderr file descriptors must be closed so that the invoked command
+	# can be detached properly, otherwise ssh might hang if used
+	# to run the command in question
+	echo "$PROGNAME: error when sending mail with '$COMMAND' output," >&2
+	echo "$PNSPACES  see the output in '$OUTFILE'" >&2
+	echo "$PNSPACES  and log file in '$LOGFILE'" >&2
+    fi
+fi
+
+
+# create timestamped directory
+mkdir -p "$TMPDIR_TIME"
+if [[ $? -ne 0 ]]; then
+    echo "$PROGNAME: cannot create timestamped directory '$TMPDIR_TIME'"
+    exit 3
+fi
+
+# move output and log file to the timestamped directory
+mv "$OUTFILE" "$LOGFILE" "$TMPDIR_TIME"
+if [[ $? -ne 0 ]]; then
+    echo "$PROGNAME: cannot move output and log files to the directory"
+    echo "$PNSPACES  '$TMPDIR_TIME'"
+    exit 3
+fi
+
+# remove pid directory, it should be empty now
+rmdir "$TMPDIR_PID"
+if [[ $? -ne 0 ]]; then
+    echo "$PROGNAME: cannot remove directory '$TMPDIR_PID'"
+    exit 3
+fi
+
+# exit
+exit 0

@@ -1,0 +1,2339 @@
+#!/bin/bash
+
+###############################################################################
+#
+# script: tar-lvm
+# author: Lukas Baxa alias Baxic <baxic-cs@seznam.cz>
+#
+# This script is free software; you can redistribute it and/or modify it
+# under the terms of the GNU General Public License as published by the
+# Free Software Foundation; either version 3, or (at your option) any later
+# version.
+#
+###############################################################################
+
+
+# set program name
+PROGNAME='tar-lvm'
+PNSPACES='       '
+
+# set versions
+SCRIPT_VERSION='00.20'
+SUITE_VERSION='00.80'
+
+# set configuration directory and file
+WORKDIR="/var/local/$PROGNAME"
+CONFFILE="/usr/local/etc/$PROGNAME/$PROGNAME.conf"
+
+# set uuid filename
+UUID_FILE="uuid.list.$PROGNAME"
+
+# set tmpfs size in bytes
+TMPFS_SIZE="$((20*1024*1024))"
+
+# exit commands array and clean exit running flag
+unset EXIT_CMDS
+CE_RUNNING=1
+
+# script result as a string, i.e. its exit status printed at the end
+RESULT='FAILURE'
+
+# unset global array variables
+unset RWFS
+unset RWLV
+unset SNLV
+
+
+# set default values that might be redefined in the configuration file
+
+# LVSNAPSUFFIX is a suffix that is appended to the lvm logical volume names
+# in order to get a name of a corresponding snapshot
+LVSNAPSUFFIX='.tar-lvm'
+
+# disables GNU/tar ACLs support if set
+unset NOACLS
+
+# the following array variables are used to store the lvm logical volumes
+# or non-lvm devices, i.e. their type ("lvm"), name, group, snapshot size
+# and list of directories to exclude or type ("fs"), name, device path
+# and list of directories to exclude
+unset LVFSTYPE
+unset LVFSNAME
+unset FSDEV
+unset LVGROUP
+unset LVSNAPSIZE
+unset LVFSEXCLUDE
+
+
+# check_tools() tool1 ... toolN
+#   check if all the external tools tool1 ... toolN are available on the system
+# return: exit - some of the tools are missing
+#         0 - ok
+check_tools() {
+
+    local fail fst
+    local tool
+    
+    if ! which which >/dev/null 2>&1; then
+	echo "$PROGNAME: cannot find the 'which' command that is necessary" >&2
+	exit 2
+    fi
+
+    fail=1
+    fst=0
+    for tool in "$@"; do
+	if ! which "$tool" >/dev/null 2>&1; then
+	    if [[ "$fst" = 0 ]]; then
+		echo "$PROGNAME: cannot find the following tools/commands that are necessary" >&2
+		fst=1
+	    fi
+	    echo "  '$tool'" >&2
+	    fail=0
+	fi
+    done
+
+    [[ "$fail" = 0 ]] && exit 2
+    return 0
+    
+}
+
+
+# usage() [exit_code]
+#   print the usage info and exit with given exit code (default 0)
+# return: exit
+usage() {
+
+    local ec="${1:-0}"
+    if [[ "$ec" != 0 ]]; then
+	exec >&2
+    fi
+
+    echo "$PROGNAME - tar filesystems on devices or lvm volumes into incremental backups"
+    echo
+    echo "    ($PROGNAME version: $SCRIPT_VERSION, $PROGNAME suite version: $SUITE_VERSION)"
+    echo
+    echo "usage: $PROGNAME -h | help"
+    echo "       $PROGNAME [-v] pre"
+    echo "       $PROGNAME [-v] [-f] run level outdir"
+    echo "       $PROGNAME [-v] post"
+    echo "       $PROGNAME check level outdir"
+    echo "       $PROGNAME [-v] clean"
+    echo
+    echo '    -h | help ... print help and exit'
+    echo '    pre ... prepare the system for the backup, i.e. remount filesystems'
+    echo '            read-only, create lvm snapshots and remount filesystems on top'
+    echo '            of lvm back read-write'
+    echo '    run ... run the backup of the read-only filesystems and lvm snapshots'
+    echo '    post ... finalize the backup, i.e. remount the read-only filesystems back'
+    echo '             read-write and remove the lvm snapshots'
+    echo '    check ... check that all backup archives of the specified level and'
+    echo '              of all preceding levels exist'
+    echo '    clean ... perform cleanup, this may be needed if the script terminates'
+    echo '              unexpectedly, e.g. it it is killed by a signal, if the system'
+    echo '              is restarted or halted etc.'
+    echo
+    echo '    level ... level of the incremental backup, i.e. non-negative integer'
+    echo '    outdir ... output directory for the backups and logs'
+    echo '    -v ... verbosely print what is done'
+    echo '    -f ... force the backup, i.e. delete the archives and logs of the same'
+    echo '           and higher level than level if they exist instead of quitting'
+    echo
+
+    exit "$ec"
+    
+}
+
+
+# parse_args() arg1 ... argN
+#   parse the command-line arguments and set the global variables ARG_MODE,
+#   ARG_LEVEL, ARG_OUTDIR, ARG_V and ARG_F.
+# return: exit - wrong arguments are given
+#         0 - ok
+parse_args() {
+
+    local arg
+
+    ARGNUM=0
+    ARG_MODE=''
+    ARG_LEVEL=''
+    ARG_OUTDIR=''
+
+    ARG_V='n'
+    ARG_F='n'
+
+    for arg in "$@"; do
+	case "$arg" in
+	    '-v')
+		[[ "$ARG_V" = 'y' ]] && usage 1
+		ARG_V='y' 
+		;;
+	    '-f') 
+		[[ "$ARG_F" = 'y' ]] && usage 1
+		ARG_F='y'
+		;;
+	    *)
+		if [[ "${arg:0:1}" = '-' \
+		    && ( "$arg" != '-h' || "$ARGNUM" -gt 0 ) ]]; then
+		    usage 1
+		else		
+		    ARGNUM="$((ARGNUM+1))"
+		    case "$ARGNUM" in
+			1)  
+			    case "$arg" in
+				'-h' | 'help') 
+				    ARG_MODE='help'
+				    ;;
+				'pre' | 'run' | 'post' | 'clean' | 'check')
+				    ARG_MODE="$arg"
+				    ;;
+				*)
+				    usage 1
+				    ;;
+			    esac
+			    ;;
+			2)
+			    ARG_LEVEL="$arg"
+			    ;;
+			3)
+			    ARG_OUTDIR=$(echo -n "$arg" | sed 's#/*$##')
+			    ;;
+			*)
+			    usage 1
+			    ;;
+		    esac
+		fi
+		;;
+	esac
+    done    
+
+    if [[ -z "$ARG_MODE" ]]; then
+	usage 1
+    elif [[ "$ARG_MODE" = 'help' ]]; then
+	[[ "$ARGNUM" -ne 1 || "$ARG_V" = 'y' || "$ARG_F" = 'y' ]] && usage 1
+    elif [[ "$ARG_MODE" = 'pre' || "$ARG_MODE" = 'post' || "$ARG_MODE" = 'clean' ]]; then
+	[[ "$ARGNUM" -ne 1 || "$ARG_F" = 'y' ]] && usage 1
+    elif [[ "$ARG_MODE" = 'run' || "$ARG_MODE" = 'check' ]]; then
+	[[ "$ARGNUM" -ne 3 ]] && usage 1
+    fi
+
+    return 0
+    
+}
+
+
+# check_args()
+#   check that the command-line arguments are correct, must be called after
+#   parse_args
+# return: exit - the arguments are not correct
+#         0 - ok
+check_args() {
+
+    if [[ "$ARG_MODE" = 'run' || "$ARG_MODE" = 'check' ]]; then
+	if ! echo "$ARG_LEVEL" | grep -Eq '^[0-9]+$'; then
+	    echo "$PROGNAME: level must be a non-negative integer" >&2
+	    exit 1
+	fi
+
+	if [[ ! -d "$ARG_OUTDIR" ]]; then
+	    echo "$PROGNAME: output directory '$ARG_OUTDIR' doesn't exist" >&2
+	    exit 1
+	fi
+    fi
+
+    return 0
+    
+}
+
+
+# add_exit_cmd exit_cmd
+#   add exit command to be invoked when clean_exit is invoked, the command
+#   is just one argument to be invoked via eval
+# return: 0 - ok
+add_exit_cmd() {
+
+    local cmd="$1"
+    local i
+
+    i="${#EXIT_CMDS[@]}"
+    EXIT_CMDS[i]="$cmd"
+
+    return 0;
+
+}
+
+
+# del_exit_cmd [exit_cmd_number]
+#   remove exit command to be invoked when clean_exit is invoked, the command
+#   number can be specified, if it is not, the last command is removed if any
+# return: 0 - ok
+del_exit_cmd() {
+
+    local i="$1"
+    local j
+
+    if [[ "${#EXIT_CMDS[@]}" -gt 0 ]]; then
+	
+	if [[ -z "$i" ]]; then
+	    j="$(( ${#EXIT_CMDS[@]} - 1 ))"
+	    unset EXIT_CMDS[j]
+	else
+	    EXIT_CMDS[i]=''
+	fi
+
+    fi
+    
+    return 0;
+
+}
+
+
+# run_exit_cmds
+#   invoke all registered exit commands in the opposite order in which they
+#   were registered, but do not actually exit, then remove all exit commands
+# return: 0 - ok
+#         1 - some exit command failed
+run_exit_cmds() {
+
+    local i n
+    local cmd
+    local eval_ec ec=0
+
+    n="${#EXIT_CMDS[@]}"
+    for ((i=n-1; i>=0; i--)); do
+
+	cmd="${EXIT_CMDS[i]}"
+	if [[ -n "$cmd" ]]; then
+	    eval "$cmd"
+	    eval_ec="$?"
+	fi
+
+	if [[ "$eval_ec" -ne 0 ]]; then
+	    ec=1
+	fi
+
+    done
+
+    unset EXIT_CMDS
+    
+    return "$ec"
+    
+}
+
+
+# clean_exit [ec]
+#   exit cleanly, i.e. invoke all registered exit commands before exiting
+#   in the opposite order in which they were registered, the exit commands
+#   can be (de)registered by using add_exit_cmd/del_exit_cmd, finally,
+#   exit with the given exit code or with 1 if no exit code is given
+#   and some command fails
+# return: exit
+clean_exit() {
+
+    local ec_orig="${1:-0}"
+    local i n
+    local cmd
+    local ec=0
+
+    CE_RUNNING=0
+    
+    run_exit_cmds
+    [[ "$?" -ne 0 ]] && ec=1
+    
+    [[ "$ec_orig" = 0 && "$ec" != 0 ]] && ec_orig="$ec"
+    exit "$ec_orig"
+
+}
+
+
+# print_result()
+#   print the final status of the script, i.e. its result
+# return: 0 - ok
+print_result() {
+
+    if [[ "$ARG_V" = 'y' ]]; then
+	echo
+	echo "$PROGNAME: result => $RESULT"
+	echo
+    fi
+    
+}
+
+
+# check_root_id()
+#   check that the command is called by root
+# return: exit - the command is not called by root
+#         0 - ok or clean exit in progress
+check_root_id() {
+
+    [[ "$CE_RUNNING" = 0 ]] && return 0
+
+    if [[ $(id -u) != 0 ]]; then
+	echo "$PROGNAME: you must be root in order to use this script" >&2
+	clean_exit 2
+    fi
+
+    return 0
+    
+}
+
+
+# check_if_running()
+#   check that this script is not running yet
+# return: exit - the script is already running
+#         0 - ok
+check_if_running() {
+
+    if [[ -f "/var/run/$PROGNAME.pid" ]]; then
+
+	if [[ "$(ps -p "$(cat "/var/run/$PROGNAME.pid")" -o 'comm=')" = "$PROGNAME" ]]; then
+
+            echo "$PROGNAME: $PROGNAME already running" >&2
+            clean_exit 2
+	    
+	else
+
+	    rm -f "/var/run/$PROGNAME.pid"
+	    
+	fi
+
+    fi
+
+    echo "$$" >"/var/run/$PROGNAME.pid"
+    [[ "$?" -eq 0 ]] && add_exit_cmd "rm -f '/var/run/$PROGNAME.pid'"
+
+    return 0
+    
+}
+
+
+# check_work_dir mode
+#   check that the working directory exists and contains the subdirectories
+#   mnt and tmp with proper access permissions depending on the script mode
+#   (pre, run or post)
+# return: exit - the working directory isn't all right
+#         0 - ok or clean exit in progress
+check_work_dir() {    
+
+    [[ "$CE_RUNNING" = 0 ]] && return 0
+
+    local ok=0
+    local mode="$1"
+
+    if [[ ! -d "$WORKDIR" || ! -r "$WORKDIR" ]]; then
+	echo "$PROGNAME: the directory '$WORKDIR' doesn't exist or" >&2
+	echo "$PNSPACES  isn't readable" >&2
+	ok=1
+    fi
+
+    if [[ ! -d "$WORKDIR/mnt" || ! -r "$WORKDIR/mnt" ]]; then
+	echo "$PROGNAME: the directory '$WORKDIR/mnt' doesn't exist or" >&2
+	echo "$PNSPACES  isn't readable" >&2
+	ok=1
+    fi
+
+    if [[ "$mode" = 'pre' ]]; then
+
+ 	if [[ ! -d "$WORKDIR/tmp" || ! -r "$WORKDIR/tmp" \
+	    || ! -w "$WORKDIR/tmp" ]]; then
+	    echo "$PROGNAME: the directory '$WORKDIR/tmp' doesn't exist," >&2
+	    echo "$PNSPACES  isn't readable or writable" >&2
+	    ok=1
+	fi
+
+    else
+
+ 	if [[ ! -d "$WORKDIR/tmp" || ! -r "$WORKDIR/tmp" ]]; then
+	    echo "$PROGNAME: the directory '$WORKDIR/tmp' doesn't exist or" >&2
+	    echo "$PNSPACES  isn't readable" >&2
+	    ok=1
+	fi
+
+    fi
+
+    [[ "$ok" != 0 ]] && clean_exit 2
+
+    return 0
+    
+}
+
+
+# check_outdir()
+#   check that the output directory contains readable and writable cache
+#   and log subdirectories and if not then create them
+# return: exit - the cache and log subdirectories do not exist and cannot be
+#                created, they're not readable and writable
+#         0 - ok or clean exit in progress
+check_outdir() {
+
+    local dir
+
+    for dir in "$ARG_OUTDIR/cache" "$ARG_OUTDIR/log"; do
+
+	if [[ ! -d "$dir" ]]; then
+	    [[ -n "$ARG_V" ]] \
+		&& echo "$PROGNAME: directory '$dir' doesn't exist, creating it..."
+	    mkdir "$dir"
+	    if [[ "$?" -ne 0 ]]; then
+		echo "$PROGNAME: cannot create directory '$dir'" >&2
+		clean_exit 2
+	    fi
+	fi
+
+	[[ ! -r "$dir" ]] && chmod u+r "$dir"
+	[[ ! -w "$dir" ]] && chmod u+w "$dir"
+
+	if [[ ! -w "$dir" || ! -r "$dir" ]]; then
+	    echo "$PROGNAME: directory '$dir' not readable and writable" >&2
+	    clean_exit 2
+	fi
+
+    done
+
+    return 0
+    
+}
+
+
+# mount_tmpfs() size
+#   mount the tmpfs filesystem to the directory mntdir if not mounted yet,
+#   this filesystem remains read/write even if the tmp directory is already
+#   on a read-only filesystem
+# return: exit - cannot mount the tmpfs filesystem
+#         0 - ok or clean exit in progress
+mount_tmpfs() {
+
+    [[ "$CE_RUNNING" = 0 ]] && return 0
+
+    local size="$1"
+
+    if ! grep -Eq "^tmpfs[[:blank:]]+$WORKDIR/tmpfs" /proc/mounts; then
+	mount -t tmpfs  -o size="$size",mode=755,uid=0,gid=0 \
+            tmpfs "$WORKDIR/tmpfs"
+	if [[ $? -eq 0 ]]; then
+	    add_exit_cmd 'umount_tmpfs'
+	else
+            echo "$PROGNAME: cannot mount the tmpfs filesystem to the directory" >&2
+            echo "$PNSPACES  '$WORKDIR/tmpfs'" >&2
+            clean_exit 2	    
+	fi
+    fi
+
+    return 0
+    
+}
+
+
+# umount_tmpfs()
+#   unmount the tmpfs filesystem if it is mounted
+# return: 0 - ok (or not mounted)
+#         1 - cannot unmount the tmpfs filesystem
+umount_tmpfs() {
+
+    if grep -Eq "^tmpfs[[:blank:]]+$WORKDIR/tmpfs" /proc/mounts; then
+	umount "$WORKDIR/tmpfs"
+	if [[ $? -ne 0 ]]; then
+            echo "$PROGNAME: cannot unmount the tmpfs filesystem from the directory" >&2
+            echo "$PNSPACES  '$WORKDIR/tmpfs'" >&2
+	    return 1
+	fi
+    fi
+
+    return 0
+    
+}
+
+
+# read_config_file cfg_file
+#   read the configuration file cfg_file, each line of the configuration file
+#   which is not a comment consists of whitespace separated words, the words
+#   can be optionally enclosed in double quotes and can therefore also contain
+#   whitespace characters - space, tab, double quote and backslash may be part
+#   of a word too if they're escaped by a backslash, lines starting with #
+#   (optional whitespaces may precede #) are comments, currently only
+#   the lvsnapsuffix, noacls, fs and lv lines are supported, they are used
+#   to define the NOACLS, LVFS..., LV... and FS... global variables
+# return: exit -  the config file isn't readable or doesn't have correct format
+#         0 - ok or clean exit in progress
+read_config_file() {
+
+    [[ "$CE_RUNNING" = 0 ]] && return 0
+
+    local cfg_file="$1" cfg_cont
+    local linenum line str fch wrd
+    local ifs
+    local islss=1 isnoacls=1 n q i
+    local excl
+
+    # check that the config file exists and is readable
+    if [[ -f "$cfg_file" && -r "$cfg_file" ]]; then
+	cfg_cont="$(cat "$cfg_file")"
+    else	
+	echo "$PROGNAME: cannot read the configuration file '$cfg_file'" >&2
+	clean_exit 2
+    fi
+
+    # remove space, tab and newline from IFS so that the whole line
+    # including the leading whitespace is read by the read built-in
+    ifs="$IFS"
+    IFS=""
+
+    # read and process all lines from the file cfg_file
+    linenum=0
+    while read -r line; do
+	linenum=$((linenum+1))
+
+	unset args
+	local -a args
+
+	# remove comments, i.e. lines beginning with #, optional whitespace
+        # may precede the # character
+	str=$(echo "$line" | sed -r 's/^([[:blank:]]*)#.*$/\1/')
+
+	# read words from the line read and store them into the args array
+	while true; do
+
+	    # remove leading whitespace
+	    str=$(echo "$str" | sed -nr 's#^[[:blank:]]*(.*)?$#\1#p')
+
+	    # if there is no first character, i.e. no word, then break
+	    fch="${str:0:1}"
+	    if [[ -z "$fch" ]]; then
+		break
+
+	    # if the first character isn't ", the word is delimited
+	    # by whitespace that is not escaped by \
+	    elif [[ "$fch" != '"' ]]; then
+		wrd=$(echo "$str" | sed -nr 's#^(([^[:blank:]"\\]*[\\][[:blank:]"\\])*[^[:blank:]"\\]*)([[:blank:]]+(.*))?$#\1#p')
+		str=$(echo "$str" | sed -nr 's#^(([^[:blank:]"\\]*[\\][[:blank:]"\\])*[^[:blank:]"\\]*)([[:blank:]]+(.*))?$#\4#p')
+
+	    # if the first character is ", the word is delimited by
+	    # double quotes that are not escaped by \ and the quoted words
+	    # by whitespace
+            elif [[ "$fch" = '"' ]]; then
+		wrd=$(echo "$str" | sed -nr 's#^"(([^"\\]*[\\][[:blank:]"\\])*[^"\\]*)"([[:blank:]]+(.*))?$#\1#p')
+		str=$(echo "$str" | sed -nr 's#^"(([^"\\]*[\\][[:blank:]"\\])*[^"\\]*)"([[:blank:]]+(.*))?$#\4#p')
+	    fi
+
+	    # replace all characters escaped by \ in the word read
+            wrd=$(echo "$wrd" | sed -r 's#[\\]([[:blank:]"\\])#\1#g')
+
+	    # store the resulting word into the args array
+	    args[${#args[*]}]="$wrd"
+	done
+
+	# if the line has at least one word, check if it is correct and
+        # assign values to appropriate variables
+	if [[ ${#args[*]} -gt 0 ]]; then
+
+	    case "${args[0]}" in
+
+		'lvsnapsuffix')		    
+		    if [[ "$islss" = 0 ]]; then
+			echo "$PROGNAME: lvsnapsuffix defined multiple times in the config file" >&2
+			clean_exit 2
+		    fi
+		    islss=0
+		    if [[ ${#args[*]} -ne 2 || -z "${args[1]}" ]]; then
+			echo "$PROGNAME: incorrect format of the config line number $linenum:" >&2
+			echo "$line" >&2
+			clean_exit 2
+		    fi
+		    LVSNAPSUFFIX="${args[1]}"
+		    ;;
+
+		'noacls')
+		    if [[ "$isnoacls" = 0 ]]; then
+			echo "$PROGNAME: noacls defined multiple times in the config file" >&2
+			clean_exit 2
+		    fi
+		    isnoacls=0
+		    if [[ ${#args[*]} -ne 2 || -z "${args[1]}" ]]; then
+			echo "$PROGNAME: incorrect format of the config line number $linenum:" >&2
+			echo "$line" >&2
+			clean_exit 2
+		    fi
+		    NOACLS="${args[1]}"
+		    ;;
+		    		    
+		'fs')
+		    if [[ ${#args[*]} -lt 3 \
+			|| -z "${args[1]}" || -z "${args[2]}" ]]; then
+			echo "$PROGNAME: incorrect format of the config line number $linenum:" >&2
+			echo "$line" >&2
+			clean_exit 2
+		    fi
+		    n="${#LVFSTYPE[*]}"
+		    LVFSTYPE[n]="fs"		    
+		    LVFSNAME[n]="${args[1]}"
+		    FSDEV[n]="${args[2]}"
+		    q=3
+		    ;;
+
+		'lv')
+		    if [[ ${#args[*]} -lt 4 || -z "${args[1]}" \
+			|| -z "${args[2]}" || -z "${args[3]}" ]]; then
+			echo "$PROGNAME: incorrect format of the config line number $linenum:" >&2
+			echo "$line" >&2
+			clean_exit 2
+		    fi
+		    n="${#LVFSTYPE[*]}"
+		    LVFSTYPE[n]='lv'
+		    LVFSNAME[n]="${args[1]}"
+		    LVGROUP[n]="${args[2]}"
+		    LVSNAPSIZE[n]="${args[3]}"
+		    q=4
+		    ;;
+
+		*)
+		    echo "$PROGNAME: incorrect format of the config line number $linenum:" >&2
+		    echo "$line" >&2
+		    clean_exit 2
+		    ;;
+	    esac
+
+	    if [[ "${args[0]}" = 'fs' || "${args[0]}" = 'lv' ]]; then
+		for ((i=q; i<${#args[*]}; i++)); do
+		    if [[ -z "${args[i]}" ]]; then
+			echo "$PROGNAME: incorrect format of the config line number $linenum:" >&2
+			echo "$line" >&2
+			clean_exit 2
+		    fi
+		    # replace an inner ' by '"'"' so that eval can be used
+		    # later because LVFSEXCLUDE[n] is a whitespace separated
+		    # list of directories enclosed in single quotes (bash
+		    # doesn't provide two dimensional arrays)		    
+		    excl=$(echo "${args[i]}" \
+			| sed "s#'#'\"'\"'#g")
+		    LVFSEXCLUDE[n]="${LVFSEXCLUDE[n]} '$excl'"
+		done
+	    fi
+
+	fi
+
+    done <<EOF_TARLVM_CONF_821
+$(echo "$cfg_cont")
+EOF_TARLVM_CONF_821
+
+    IFS="$ifs"
+
+    return 0
+    
+}
+
+
+# check_config()
+#   check that the configuration is correct, i.e. that all names (non-lvm
+#   LVFSNAMEs and lvm LVGROUP-LVFSNAMEs) are unique and that all snapshot
+#   sizes LVSNAPSIZEs are numerical values with a % suffix, should be run
+#   after read_config_file
+# return: exit - all names are not unique or some snapshot size is incorrect
+#         0 - ok or clean exit in progress
+check_config() {
+
+    [[ "$CE_RUNNING" = 0 ]] && return 0
+
+    local i fst
+    local name nm prevnm size
+
+    # check that the names are unique
+    fst=0
+    prevnm=""
+    for ((i=0; i<${#LVFSTYPE[i]}; i++)); do
+	name="${LVFSNAME[i]}"
+	[[ "${LVFSTYPE[i]}" = 'lv' ]] && name="${LVGROUP[i]}-$name"
+	echo "$name"
+    done \
+	| sort \
+	| while read nm; do
+            if [[ "$fst" != 0 && "$prevnm" = "$nm" ]]; then
+		echo "$PROGNAME: name '$nm' cannot be used more than once, edit the config file" >&2
+		exit 1 # return from the subshell created because of the pipe
+	    fi
+	    prevnm="$nm"
+	    fst=1
+        done
+    [[ "$?" -ne 0 ]] && clean_exit 2 # really exit
+
+    # check LVSNAPSIZEs
+    for ((i=0; i<${#LVFSTYPE[i]}; i++)); do
+	if [[ "${LVFSTYPE[i]}" = 'lv' ]]; then
+	    name="${LVFSNAME[i]}"
+	    size="${LVSNAPSIZE[i]}"
+	    if ! echo "$size" | grep -Eq '^[1-9][0-9]*%$'; then
+		echo "$PROGNAME: snapshot size of the '$name' lvm volume must be a positive integer" >&2
+		echo "$PNSPACES  with a % suffix, because it specifies the size with respect" >&2
+		echo "$PNSPACES  to the origin, edit the config file" >&2
+		exit 1 # return from the subshell created because of the pipe
+	    fi
+	    [[ "$?" -ne 0 ]] && clean_exit 2 # really exit	
+	fi
+    done
+
+    return 0
+    
+}
+
+
+# check_uuid_presence()
+#   check whether the UUID syntax is used in the configuration
+# return:
+#   0 - used
+#   1 - not used
+check_uuid_presence() {
+
+    local n="${#LVFSTYPE[*]}"
+    local i
+    
+    for ((i=0; i<n; i++)); do
+	if [[ "${LVFSTYPE[i]}" = 'fs' ]]; then
+	    echo "${FSDEV[i]:0:5}" | grep -qi '^UUID=$'
+	    [[ $? -eq 0 ]] && return 0
+	fi
+    done
+
+    return 1
+    
+}
+
+
+# check_addon_tools()
+#   check if add-on tools that are necessary for proper operation are present
+#   in the system, the specific tools depend on given script arguments
+#   or configuration
+# return: exit - some of the tools are missing
+#         0 - ok
+check_addon_tools() {
+
+    [[ "$CE_RUNNING" = 0 ]] && return 0
+
+    local ec=0
+    local lvfstype lvflag
+
+    # check that the blkid binary exists if UUID= is used in the configuration
+    if check_uuid_presence; then
+	if ! which blkid >/dev/null; then
+	    echo "$PROGNAME: 'blkid' binary not found and UUID= syntax used" >&2
+	    echo "$PNSPACES  in the config file" >&2
+	    ec=2
+	fi
+    fi
+
+    # check that no filesystems on top of lvm are present
+    lvflag=1
+    for lvfstype in "${LVFSTYPE[@]}"; do
+	[[ "$lvfstype" = 'lv' ]] && lvflag=0 && break
+    done
+
+    if [[ "$lvflag" = 0 ]]; then
+	if ! which lvcreate >/dev/null || ! which lvremove >/dev/null \
+		|| ! which lvdisplay >/dev/null; then
+	    echo "$PROGNAME: 'lvcreate', 'lvremove' or 'lvdisplay' binary not found" >&2	    
+	    echo "$PNSPACES  and filesystems on top of lvm specified in the config file" >&2
+	    ec=2
+	fi
+    fi	
+    
+    [[ "$ec" -ne 0 ]] && clean_exit "$ec"
+    return 0
+    
+}
+
+
+# get_timestamp
+#   print timestamp in the RFC-3339 format
+# return:
+#   0 - ok
+get_timestamp() {
+
+    if [[ "$ARG_V" = 'y' ]]; then
+	echo -n "$PROGNAME: "
+	date --rfc-3339=seconds
+    fi
+
+    return 0
+    
+}
+
+
+# check_proc_mounts() ('real'|'copy')
+#   check that the file /proc/mounts or its copy in the tmp workdir is
+#   available and that it is readable
+# return: exit - the file isn't available in the pre, run or post mode
+#         0 - ok or clean exit in progress
+#         1 - the file isn't available in the clean mode
+check_proc_mounts() {
+
+    [[ "$CE_RUNNING" = 0 ]] && return 0
+
+    local file="$1"
+
+    if [[ "$file" = 'real' ]]; then
+
+	if [[ ! -f '/proc/mounts' || ! -r '/proc/mounts' ]]; then
+	    echo "$PROGNAME: the file '/proc/mounts' must exist and be readable, is the /proc" >&2
+	    echo "$PNSPACES  filesystem mounted?" >&2
+
+	    clean_exit 2
+	fi
+
+    elif [[ "$file" = 'copy' ]]; then
+
+	if [[ "$ARG_MODE" = 'pre' ]]; then
+
+	    if [[ -f "$WORKDIR/tmp/mounts" ]]; then
+		echo "$PROGNAME: the file '$WORKDIR/tmp/mounts' already exists which" >&2
+		echo "$PNSPACES  indicates that this command in the pre mode has already" >&2
+		echo "$PNSPACES  successfully finished its preparation, use this command" >&2
+		echo "$PNSPACES  in the post mode to revert to the original state and" >&2
+		echo "$PNSPACES  rather check if the filesystems were remounted properly" >&2
+		echo "$PNSPACES  and the lvm snaphots removed (this might not be the case" >&2
+		echo "$PNSPACES  if you ran this command in the pre mode some time ago" >&2
+		echo "$PNSPACES  with different configuration)" >&2
+
+		clean_exit 2
+	    fi
+
+	elif [[ "$ARG_MODE" = 'post' ]]; then
+
+	    if [[ ! -f "$WORKDIR/tmp/mounts" || ! -r "$WORKDIR/tmp/mounts" ]]; then
+		echo "$PROGNAME: the file '$WORKDIR/tmp/mounts' isn't available or readable," >&2
+		echo "$PNSPACES  this indicates that this command in the pre mode hasn't finished" >&2
+		echo "$PNSPACES  successfully prior to the post mode and you therefore cannot" >&2
+		echo "$PNSPACES  use the post mode now, you must check and adjust the mounted" >&2
+		echo "$PNSPACES  filesystems and lvm snapshots manually by using the mount, umount," >&2
+		echo "$PNSPACES  lvs, lvremove or another lvm commands if you want to do so" >&2
+
+		clean_exit 2
+	    fi
+
+	elif [[ "$ARG_MODE" = 'run' ]]; then
+
+	    if [[ ! -f "$WORKDIR/tmp/mounts" || ! -r "$WORKDIR/tmp/mounts" ]]; then
+		echo "$PROGNAME: the file '$WORKDIR/tmp/mounts' isn't available or readable," >&2
+		echo "$PNSPACES  this indicates that this command in the pre mode hasn't finished" >&2
+		echo "$PNSPACES  successfully prior to the run mode and you therefore cannot" >&2
+		echo "$PNSPACES  use the run mode now" >&2
+
+		clean_exit 2
+	    fi
+	elif [[ "$ARG_MODE" = 'clean' ]]; then
+
+	    if [[ ! -f "$WORKDIR/tmp/mounts" || ! -r "$WORKDIR/tmp/mounts" ]]; then
+		echo "$PROGNAME: the file '$WORKDIR/tmp/mounts' isn't available or readable," >&2
+		echo "$PNSPACES  this indicates that this command in the pre mode hasn't finished" >&2
+		echo "$PNSPACES  successfully prior to the clean mode, filesystems cannot be" >&2
+		echo "$PNSPACES  remounted back" >&2
+		return 1
+	    fi
+	fi
+
+    fi
+
+    return 0
+    
+}
+
+
+# store_proc_mounts()
+#   store the file /proc/mounts into the tmp workdir
+# return: exit - the file /proc/mounts isn't readable or cannot be copied
+#         0 - ok or clean exit in progress
+store_proc_mounts() {
+    
+    [[ "$CE_RUNNING" = 0 ]] && return 0
+
+    check_proc_mounts 'real'
+    check_proc_mounts 'copy'
+    
+    cp -f /proc/mounts "$WORKDIR/tmp"
+    if [[ "$?" -ne 0 ]]; then
+	echo "$PROGNAME: cannot copy the file '/proc/mounts' into '$WORKDIR/tmp'" >&2
+	clean_exit 2
+    fi
+
+    return 0
+    
+}
+
+
+# remove_proc_mounts()
+#   remove the copy of the file /proc/mounts from the tmp workdir
+# return: 0 - ok
+#         1 - cannot remove the file
+remove_proc_mounts() {
+
+    rm -f "$WORKDIR/tmp/mounts"
+    if [[ "$?" -ne 0 ]]; then
+	echo "$PROGNAME: cannot remove the file '$WORKDIR/tmp/mounts'," >&2
+	echo "$PNSPACES  check and remove it manually!!! this is important" >&2
+	echo "$PNSPACES  because the existence of this file indicates the state" >&2
+	echo "$PNSPACES  of the $PROGNAME cycle, i.e. whether the pre, post or run" >&2
+	echo "$PNSPACES  $PROGNAME actions can be executed and how the filesystems" >&2
+ 	echo "$PNSPACES  were originally mounted" >&2
+	return 1
+    fi
+
+    return 0
+
+}
+
+
+# create_uuid_file
+#   find all block devices in /dev which have uuid assigned and create
+#   uuid file in the tmp directory which maps uuids to devices
+# return: exit - cannot create the uuid file
+#         0 - ok or clean exit in progress
+create_uuid_file() {
+
+    [[ "$CE_RUNNING" = 0 ]] && return 0
+
+    local dev
+    local uuid
+
+    if [[ -e "$WORKDIR/tmpfs/$UUID_FILE" ]]; then
+	rm -fr "$WORKDIR/tmpfs/$UUID_FILE"
+	if [[ $? -ne 0 ]]; then
+	    echo "$PROGNAME: cannot delete old file '$WORKDIR/tmpfs/$UUID_FILE'" >&2
+	    echo "$PNSPACES  and cannot therefore create updated version" >&2
+	    clean_exit 2
+	fi
+    fi    
+
+    if check_uuid_presence; then
+	find /dev -type b \
+	    | while read dev; do
+		  uuid="$(blkid "$dev" | sed -nr 's#^.*[[:blank:]](PT)?UUID=\"([^\"]*)\".*$#\2#p')"
+		  if [[ -n "$uuid" ]]; then
+		      echo "$uuid $dev" >>"$WORKDIR/tmpfs/$UUID_FILE"
+		      if [[ $? -ne 0 ]]; then
+			  echo "$PROGNAME: cannot create file '$WORKDIR/tmpfs/$UUID_FILE'" >&2
+			  clean_exit 2
+		      fi
+		  fi
+	      done
+    fi
+
+    return 0
+
+}
+
+
+# get_uuid_device uuid
+#   print path to the device with the given uuid as specified in the uuid file,
+#   print nothing if no device with uuid found
+# return: 0 - ok
+get_uuid_device() {
+
+    local uuid="$1"
+
+    grep -i "^$uuid[[:blank:]]" "$WORKDIR/tmpfs/$UUID_FILE" \
+	| head -1 \
+	| sed -nr 's#^[^[:blank:]]+[[:blank:]]+([^[:blank:]]+)$#\1#p'
+
+    return 0
+    
+}
+
+
+# get_fs_type() device
+#   print device filesystem type from /proc/mounts or nothing it device
+#   wasn't found
+# return: 0 - ok
+#         1 - device not found in /proc/mounts
+get_fs_type() {
+
+    local dev="$1"
+    local mntfile mntdev mnttype
+
+    mntfile='/proc/mounts'
+
+    [[ -L "$dev" ]] && dev=$(readlink -mn "$dev")
+    
+    eval 'for line in '$(grep '^/' "$mntfile" | sed -r 's#^(.*)$#"\1"#')'; do
+
+        mntdev=$(echo "$line" | awk "{print \$1}")
+        mnttype=$(echo "$line" | awk "{print \$3}")
+
+	[[ -L "$mntdev" ]] && mntdev=`readlink -mn "$mntdev"`
+
+	if [[ "$mntdev" = "$dev" ]]; then
+            echo "$mnttype"
+            return 0
+	fi
+
+    done'
+
+    return 1
+    
+}
+
+
+# is_mount_rw() ("real"|"copy") device
+#   check if device is/was mounted rw, ro or not at all according to the
+#   real /proc/mounts file or its copy stored in the tmp workdir
+# return: 0 - device is mounted rw
+#         1 - device is mounted ro
+#         2 - device isn't mounted
+is_mount_rw() {
+
+    local mntfiletype="$1" dev="$2"
+    local mntfile mntdev mntopts
+
+    mntfile='/proc/mounts'
+    [[ "$mntfiletype" = 'copy' ]] && mntfile="$WORKDIR/tmp/mounts"
+
+    [[ -L "$dev" ]] && dev=$(readlink -mn "$dev")
+    
+    eval 'for line in '$(grep '^/' "$mntfile" | sed -r 's#^(.*)$#"\1"#')'; do
+
+        mntdev=$(echo "$line" | awk "{print \$1}")
+        mntopts=$(echo "$line" | awk "{print \$4}")
+
+	[[ -L "$mntdev" ]] && mntdev=`readlink -mn "$mntdev"`
+
+	if [[ "$mntdev" = "$dev" ]]; then
+	    echo "$mntopts" | tr "," "\n" | grep -Eq "^ro\$"
+	    if [[ "$?" -eq 0 ]]; then
+		return 1
+	    else
+		return 0
+	    fi
+	fi
+
+    done'
+
+    return 2
+    
+}
+
+
+# remount_rwfs_ro()
+#   remount the rw non-lvm filesystems ro and store their list into
+#   the RWFS array variable (pre mode) - the filesystems to remount
+#   are taken from the LVFS... and FS... array variables
+# return: 0 - all rw non-lvm filesystems remounted ro
+#         1 - some of the rw non-lvm filesystems not remounted ro
+remount_rwfs_ro() {
+
+    local i res ec=0
+    local fstype fsname fsdev fsnum
+    local uuid
+    
+    i=0
+    fstype="${LVFSTYPE[0]}"
+    fsnum=0
+
+    [[ "$ARG_V" = 'y' ]] \
+	&& echo "$PROGNAME: remounting filesystems not on lvm read-only"
+
+    while [[ -n "$fstype" ]]; do
+
+	if [[ "$fstype" = 'fs' ]]; then
+
+	    if echo "${FSDEV[i]:0:5}" | grep -qi '^UUID=$'; then
+		uuid="$(echo "${FSDEV[i]}" | sed -r 's#^....=##')"
+		fsdev="$(get_uuid_device "$uuid")"
+		if [[ -z "$fsdev" || ! -b "$fsdev" ]]; then
+		    echo "$PROGNAME: block device with uuid '$uuid' not found" >&2
+		    ec=1
+		    break
+		fi
+	    else
+		fsdev="${FSDEV[i]}"
+		if [[ -z "$fsdev" || ! -b "$fsdev" ]]; then
+		    echo "$PROGNAME: block device '$fsdev' not found" >&2
+		    ec=1
+		    break
+		fi
+	    fi
+
+	    fsname="${LVFSNAME[i]}"
+
+	    is_mount_rw 'copy' "$fsdev"
+	    res="$?"
+
+	    if [[ "$res" = 0 ]]; then
+		[[ "$ARG_V" = 'y' ]] \
+		    && echo "  filesystem '$fsname', i.e. device '$fsdev'"
+		mount -o remount,ro "$fsdev"
+		if [[ "$?" -eq 0 ]]; then
+		    RWFS[${#RWFS[*]}]="$fsdev"
+		    fsnum="$((fsnum+1))"
+		else
+		    echo "$PROGNAME: cannot remount device '$fsdev' read-only" >&2
+		    ec=1
+		    break
+		fi
+	    fi
+
+	fi
+
+	fstype="${LVFSTYPE[++i]}"
+    done
+
+    [[ "$ARG_V" = 'y' ]] \
+	&& echo "$PROGNAME: $fsnum filesystem(s) not on lvm remounted read-only"
+
+    return "$ec"
+    
+}
+
+
+# remount_rwfs_rw()
+#   remount the non-lvm filesystems that were originally mounted rw, but
+#   were remounted ro, back rw (pre mode) - the list of such filesystems
+#   is taken from the RWFS array variable
+# return: 0 - all former rw non-lvm filesystems were remounted back rw
+#         1 - some of the former rw non-lvm filesystems not remounted back rw
+remount_rwfs_rw() {
+
+    local i ec=0
+    local fsnum
+
+    [[ "$ARG_V" = 'y' ]] \
+	&& echo "$PROGNAME: remounting filesystems not on lvm back read-write"
+
+    fsnum=0
+    for ((i=0; i<${#RWFS[*]}; i++)); do
+	[[ "$ARG_V" = 'y' ]] \
+	    && echo "  device '${RWFS[i]}'"
+	mount -o remount,rw "${RWFS[i]}"
+	if [[ "$?" -eq 0 ]]; then
+	    fsnum="$((fsnum+1))"
+	else
+	    echo "$PROGNAME: cannot remount '${RWFS[i]}' device back read-write," >&2
+	    echo "$PNSPACES  check and remount manually" >&2
+	    ec=1
+	fi
+    done
+
+    [[ "$ARG_V" = 'y' ]] \
+	&& echo "$PROGNAME: $fsnum filesystem(s) not on lvm remounted back read-write"
+
+    return "$ec"
+    
+}
+
+
+# remount_rwlv_ro()
+#   remount the rw lvm filesystems ro and store their list into the RWLV
+#   array variable (pre mode) - the filesystems to remount are taken from
+#   the LVFS... and LV... array variables
+# return: 0 - all rw lvm filesystems remounted ro
+#         1 - some of the rw lvm filesystems not remounted ro
+remount_rwlv_ro() {
+
+    local i res ec=0
+    local lvtype lvname lvgroup lvdev lvnum
+
+    i=0
+    lvtype="${LVFSTYPE[0]}"
+    lvnum=0
+
+    [[ "$ARG_V" = 'y' ]] \
+	&& echo "$PROGNAME: remounting filesystems on top of lvm read-only"
+
+    while [[ -n "$lvtype" ]]; do
+
+	if [[ "$lvtype" = 'lv' ]]; then
+	
+	    lvname="${LVFSNAME[i]}"
+	    lvgroup="${LVGROUP[i]}"
+	    lvdev="/dev/$lvgroup/$lvname"
+
+	    is_mount_rw 'copy' "$lvdev"
+	    res="$?"
+
+	    if [[ "$res" = 0 ]]; then
+		[[ "$ARG_V" = 'y' ]] \
+		    && echo "  logical volume '$lvname' in group '$lvgroup', i.e. device '$lvdev'"
+		mount -o remount,ro "$lvdev"
+		if [[ "$?" -eq 0 ]]; then
+		    RWLV[${#RWLV[*]}]="$lvdev"
+		    lvnum="$((lvnum+1))"
+		else
+		    echo "$PROGNAME: cannot remount device '$lvdev' read-only" >&2
+		    ec=1
+		    break
+		fi
+	    fi
+
+	fi
+
+	lvtype="${LVFSTYPE[++i]}"
+    done
+
+    [[ "$ARG_V" = 'y' ]] \
+	&& echo "$PROGNAME: $lvnum filesystem(s) on top of lvm remounted read-only"
+
+    return "$ec"
+    
+}
+
+
+# remount_rwlv_rw()
+#   remount the lvm filesystems that were originally mounted rw, but
+#   were remounted ro, back rw (pre mode) - the list of such filesystems
+#   is taken from the RWLV array variable
+# return: 0 - all former rw lvm filesystems were remounted back rw
+#         1 - some of the former rw lvm filesystems not remounted back rw
+remount_rwlv_rw() {
+
+    local i ec=0
+    local lvnum
+
+    [[ "$ARG_V" = 'y' ]] \
+	&& echo "$PROGNAME: remounting filesystems on top of lvm back read-write"
+
+    lvnum=0
+    for ((i=0; i<${#RWLV[*]}; i++)); do
+	[[ "$ARG_V" = 'y' ]] \
+	    && echo "  device '${RWLV[i]}'"
+	mount -o remount,rw "${RWLV[i]}"
+	if [[ "$?" -eq 0 ]]; then
+	    lvnum="$((lvnum+1))"
+	else
+	    echo "$PROGNAME: cannot remount '${RWLV[i]}' device back read-write," >&2
+	    echo "$PNSPACES  check and remount manually" >&2
+	    ec=1
+	fi
+    done
+
+    [[ "$ARG_V" = 'y' ]] \
+	&& echo "$PROGNAME: $lvnum filesystem(s) on top of lvm remounted back read-write"
+
+    return "$ec"
+    
+}
+
+
+# create_lvsnap()
+#   create snapshots of lvm logical volumes and store their list into
+#   the SNLV array variable (pre mode) - the list of the lvm logical
+#   volumes is taken from the LVFS... and LV... array variables
+# return: 0 - snapshots created
+#         1 - creation of snapshots failed
+create_lvsnap() {
+
+    local i res ec=0
+    local lvtype lvname lvgroup lvsnapsize lvsnapname snnum
+
+    i=0
+    lvtype="${LVFSTYPE[0]}"
+
+    [[ "$ARG_V" = 'y' ]] \
+	&& echo "$PROGNAME: creating lvm snapshot logical volumes"
+
+    snnum=0
+    while [[ -n "$lvtype" ]]; do
+
+	if [[ "$lvtype" = 'lv' ]]; then
+
+	    lvname="${LVFSNAME[i]}"
+	    lvgroup="${LVGROUP[i]}"
+	    lvsnapsize="${LVSNAPSIZE[i]}"
+	    lvsnapname="$lvname$LVSNAPSUFFIX"
+
+	    [[ "$ARG_V" = 'y' ]] \
+		&& echo "  snapshot '$lvsnapname' of origin '$lvname' in group '$lvgroup'"
+
+	    lvcreate -l "${lvsnapsize}ORIGIN" -n "$lvsnapname" \
+		-s "$lvgroup/$lvname" >/dev/null
+	    if [[ "$?" -eq 0 ]]; then
+		SNLV[${#SNLV[*]}]="$lvgroup/$lvsnapname"
+		snnum="$((snnum+1))"
+	    else
+		echo "$PROGNAME: cannot create lvm snapshot '$lvsnapname' of logical volume" >&2
+		echo "$PNSPACES  '$lvgroup/$lvname', if the cause is that such a snapshot volume" >&2
+		echo "$PNSPACES  already exists, consider removing it or change the value" >&2
+		echo "$PNSPACES  of lvsnapsuffix in the configuration file, another common" >&2
+		echo "$PNSPACES  cause is that the lvm metadata backup directory or" >&2
+		echo "$PNSPACES  the lvm directory with file locks are already on a read-only" >&2
+		echo "$PNSPACES  filesystem" >&2
+
+		ec=1
+		break
+	    fi
+
+	fi
+
+	lvtype="${LVFSTYPE[++i]}"
+    done
+
+    [[ "$ARG_V" = 'y' ]] \
+	&& echo "$PROGNAME: $snnum lvm snapshot logical volume(s) created"
+
+    return "$ec"
+    
+}
+
+
+# remove_lvsnap()
+#   remove snapshots of lvm logical volumes created previously (pre mode) -
+#   the list of such snapshots is taken from the SNLV array variable
+# return: 0 - previously created snapshots removed
+#         1 - some of the previously created snapshots not removed
+remove_lvsnap() {
+
+    local i ec=0
+    local snnum
+
+    [[ "$ARG_V" = 'y' ]] \
+	&& echo "$PROGNAME: removing lvm snapshot logical volumes"
+
+    snnum=0
+    for ((i=0; i<${#SNLV[*]}; i++)); do
+	[[ "$ARG_V" = 'y' ]] \
+	    && echo "  snapshot '${SNLV[i]}'"
+	lvremove -f "${SNLV[i]}" >/dev/null
+	if [[ "$?" -eq 0 ]]; then
+	    snnum="$((snnum+1))"
+	else
+	    echo "$PROGNAME: cannot remove '${SNLV[i]}' snapshot created previously," >&2
+	    echo "$PNSPACES  check and remove manually" >&2
+	    ec=1
+	fi
+    done
+
+    [[ "$ARG_V" = 'y' ]] \
+	&& echo "$PROGNAME: $snnum lvm snapshot logical volume(s) removed"
+    
+    return "$ec"
+    
+}
+
+
+# remount_rwfs_rw_post()
+#   remount the non-lvm filesystems that were rw during the pre mode and are
+#   not unmounted back rw (post mode) - each non-lvm filesystem stored in
+#   the LVFS... and FS... array variables is examined (each of the type "fs"),
+#   its current and previous states are determined from the /proc/mounts file
+#   and its copy stored into the tmp workdir during the pre phase
+# return: 0 - all former rw non-lvm filesystems were remounted back rw
+#         1 - some of the former rw non-lvm filesystems that are not unmounted
+#             not remounted back rw
+remount_rwfs_rw_post() {
+
+    local ec=0
+    local i reswas resis
+    local fstype fsname fsdev fsnum
+    local uuid
+
+    i=0
+    fstype="${LVFSTYPE[0]}"
+
+    [[ "$ARG_V" = 'y' ]] \
+	&& echo "$PROGNAME: remounting filesystems not on lvm back read-write"
+
+    fsnum=0
+    while [[ -n "$fstype" ]]; do
+
+	if [[ "$fstype" = 'fs' ]]; then
+
+	    if echo "${FSDEV[i]:0:5}" | grep -qi '^UUID=$'; then
+		uuid="$(echo "${FSDEV[i]}" | sed -r 's#^....=##')"
+		fsdev="$(get_uuid_device "$uuid")"
+		if [[ -z "$fsdev" || ! -b "$fsdev" ]]; then
+		    echo "$PROGNAME: block device with uuid '$uuid' not found" >&2
+		    ec=1
+		    continue
+		fi
+	    else
+		fsdev="${FSDEV[i]}"
+		if [[ -z "$fsdev" || ! -b "$fsdev" ]]; then
+		    echo "$PROGNAME: block device '$fsdev' not found" >&2
+		    ec=1
+		    continue
+		fi
+	    fi
+
+	    fsname="${LVFSNAME[i]}"
+
+	    is_mount_rw 'copy' "$fsdev"
+	    reswas="$?"
+
+	    is_mount_rw 'real' "$fsdev"
+	    resis="$?"
+
+	    case "$reswas" in
+		0)
+		    if [[ "$resis" = 0 ]]; then
+			echo "$PROGNAME: device '$fsdev' was mounted read-write during the pre phase"
+			echo "$PNSPACES  and it is already mounted read-write, skipping ..."
+		    elif [[ "$resis" = 1 ]]; then
+			[[ "$ARG_V" = 'y' ]] \
+			    && echo "  filesystem '$fsname', i.e. device '$fsdev'"
+			mount -o remount,rw "$fsdev"
+			if [[ "$?" -eq 0 ]]; then
+			    fsnum="$((fsnum+1))"
+			else
+			    echo "$PROGNAME: cannot remount device '$fsdev' back read-write," >&2
+			    echo "$PNSPACES  check and remount manually" >&2
+			    ec=1
+			fi
+		    elif [[ "$resis" = 2 ]]; then
+			echo "$PROGNAME: device '$fsdev' was mounted read-write during the pre phase,"
+			echo "$PNSPACES  but it is unmounted, skipping ..."
+		    fi
+		    ;;
+
+		1)  
+		    if [[ "$resis" = 0 ]]; then
+			echo "$PROGNAME: device '$fsdev' was mounted read-only during the pre phase,"
+			echo "$PNSPACES  but is mounted read-write, skipping ..."
+		    elif [[ "$resis" = 2 ]]; then
+			echo "$PROGNAME: device '$fsdev' was mounted read-only during the prs phase,"
+			echo "$PNSPACES  but it is unmounted, skipping ..."
+		    fi
+		    ;;
+
+		2)
+		    if [[ "$resis" = 0 ]]; then
+			echo "$PROGNAME: device '$fsdev' was unmounted during the pre phase and"
+			echo "$PNSPACES  it is mounted read-write, skipping ..."
+		    elif [[ "$resis" = 1 ]]; then
+			echo "$PROGNAME: device '$fsdev' was unmounted during the pre phase and"
+			echo "$PNSPACES  it is mounted read-only, skipping ..."
+		    fi
+		    ;;
+	    esac
+
+	fi
+
+	fstype="${LVFSTYPE[++i]}"
+    done
+
+    [[ "$ARG_V" = 'y' ]] \
+	&& echo "$PROGNAME: $fsnum filesystem(s) not on lvm remounted back read-write"
+
+    return "$ec"
+    
+}
+
+
+# remount_rwlv_rw_clean()
+#   remount the lvm filesystems that were rw during the pre mode and are
+#   not unmounted back rw (clean mode) - each lvm filesystem stored in
+#   the LVFS... and FS... array variables is examined (each of the type "lv"),
+#   its current and previous states are determined from the /proc/mounts file
+#   and its copy stored into the tmp workdir during the pre phase
+# return: 0 - all former rw lvm filesystems were remounted back rw
+#         1 - some of the former rw lvm filesystems that are not unmounted
+#             not remounted back rw
+remount_rwlv_rw_clean() {
+
+    local ec=0
+    local i reswas resis
+    local lvtype lvname lvdev lvdev2 lvnum
+    local uuid
+
+    i=0
+    lvtype="${LVFSTYPE[0]}"
+
+    [[ "$ARG_V" = 'y' ]] \
+	&& echo "$PROGNAME: remounting filesystems on top of lvm back read-write"
+
+    lvnum=0
+    while [[ -n "$lvtype" ]]; do
+
+	if [[ "$lvtype" = 'lv' ]]; then
+
+	    lvname="${LVFSNAME[i]}"
+	    lvgroup="${LVGROUP[i]}"
+	    lvdev="/dev/$lvgroup/$lvname"
+	    lvdev2="/dev/mapper/$(echo "$lvgroup" | sed -r 's#-#--#g')-$(echo "$lvname" | sed -r 's#-#--#g')"
+	    
+	    if [[ -z "$lvdev" || ! -b "$lvdev" ]]; then
+		echo "$PROGNAME: block device '$lvdev' not found" >&2
+		ec=1
+		continue
+	    fi
+
+	    lvname="${LVFSNAME[i]}"
+
+	    is_mount_rw 'copy' "$lvdev"
+	    reswas="$?"
+	    if [[ "$reswas" = 2 ]]; then
+		is_mount_rw 'copy' "$lvdev2"
+		reswas="$?"
+	    fi
+
+	    is_mount_rw 'real' "$lvdev"
+	    resis="$?"
+	    if [[ "$resis" = 2 ]]; then
+		is_mount_rw 'copy' "$lvdev2"
+		resis="$?"
+	    fi
+
+	    case "$reswas" in
+		0)
+		    if [[ "$resis" = 0 ]]; then
+			echo "$PROGNAME: device '$lvdev' was mounted read-write during the pre phase"
+			echo "$PNSPACES  and it is already mounted read-write, skipping ..."
+		    elif [[ "$resis" = 1 ]]; then
+			[[ "$ARG_V" = 'y' ]] \
+			    && echo "  logical volume '$lvname' in group '$lvgroup', i.e. device '$lvdev'"
+			mount -o remount,rw "$lvdev"
+			if [[ "$?" -eq 0 ]]; then
+			    lvnum="$((lvnum+1))"
+			else
+			    echo "$PROGNAME: cannot remount device '$lvdev' back read-write," >&2
+			    echo "$PNSPACES  check and remount manually" >&2
+			    ec=1
+			fi
+		    elif [[ "$resis" = 2 ]]; then
+			echo "$PROGNAME: device '$lvdev' was mounted read-write during the pre phase,"
+			echo "$PNSPACES  but it is unmounted, skipping ..."
+		    fi
+		    ;;
+
+		1)  
+		    if [[ "$resis" = 0 ]]; then
+			echo "$PROGNAME: device '$lvdev' was mounted read-only during the pre phase,"
+			echo "$PNSPACES  but is mounted read-write, skipping ..."
+		    elif [[ "$resis" = 2 ]]; then
+			echo "$PROGNAME: device '$lvdev' was mounted read-only during the prs phase,"
+			echo "$PNSPACES  but it is unmounted, skipping ..."
+		    fi
+		    ;;
+
+		2)
+		    if [[ "$resis" = 0 ]]; then
+			echo "$PROGNAME: device '$lvdev' was unmounted during the pre phase and"
+			echo "$PNSPACES  it is mounted read-write, skipping ..."
+		    elif [[ "$resis" = 1 ]]; then
+			echo "$PROGNAME: device '$lvdev' was unmounted during the pre phase and"
+			echo "$PNSPACES  it is mounted read-only, skipping ..."
+		    fi
+		    ;;
+	    esac
+
+	fi
+
+	lvtype="${LVFSTYPE[++i]}"
+    done
+
+    [[ "$ARG_V" = 'y' ]] \
+	&& echo "$PROGNAME: $lvnum filesystem(s) on top of lvm remounted back read-write"
+
+    return "$ec"
+    
+}
+
+
+# remove_lvsnap_post()
+#    remove snapshots of lvm logical volumes created during the pre phase
+#    (post mode) - all snapshots of the lvm logical volumes specified
+#    in the LVFS... and LV... array variables of type "lv" and have
+#    the LVSNAPSUFFIX suffix are removed
+# return: 0 - ok, snapshots successfully removed
+#         1 - some of the snapshots weren't removed
+remove_lvsnap_post() {
+
+    local i res ec=0
+    local lvtype lvname lvgroup lvsnapname snnum
+
+    i=0
+    lvtype="${LVFSTYPE[0]}"
+    snnum=0
+
+    [[ "$ARG_V" = 'y' ]] \
+	&& echo "$PROGNAME: removing lvm snapshot logical volumes"
+
+    while [[ -n "$lvtype" ]]; do
+
+	if [[ "$lvtype" = 'lv' ]]; then
+
+	    lvname="${LVFSNAME[i]}"
+	    lvgroup="${LVGROUP[i]}"
+	    lvsnapname="$lvname$LVSNAPSUFFIX"
+
+	    lvdisplay "$lvgroup/$lvsnapname" >/dev/null 2>&1
+	    if [[ "$?" -eq 0 ]]; then
+		[[ "$ARG_V" = 'y' ]] \
+		    && echo "  snapshot '$lvsnapname' of origin '$lvname' in group '$lvgroup'"
+		lvremove -f "$lvgroup/$lvsnapname" >/dev/null
+		if [[ "$?" -eq 0 ]]; then
+		    snnum="$((snnum+1))"
+		else
+		    echo "$PROGNAME: cannot remove lvm snapshot '$lvsnapname' of logical volume" >&2
+		    echo "$PNSPACES  '$lvgroup/$lvname', check and remove manually" >&2
+		    ec=1
+		fi
+	    else
+		echo "$PROGNAME: cannot find lvm snapshot '$lvgroup/$lvsnapname', skipping ..." >&2
+	    fi
+
+	fi
+
+	lvtype="${LVFSTYPE[++i]}"
+    done
+
+    [[ "$ARG_V" = 'y' ]] \
+	&& echo "$PROGNAME: $snnum lvm snapshot logical volume(s) removed"
+
+    return "$ec"
+    
+}
+
+
+# get_lvfsnameorlst() outvar [logs_flag]
+#   create a list of LVFSNAMEs separated by | and assign it to variable outvar,
+#   optionally prefix each list item with a 'tar.' prefix if logs_flag
+#   is present
+# return: 0 - ok
+get_lvfsnameorlst() {
+    
+    local outvar89="$1"
+    local lst89 i89 nm89
+    local logs_flag="$2"
+
+    lst89=""
+    i89=0
+    while [[ -n "${LVFSTYPE[i89]}" ]]; do
+	nm89="${LVFSNAME[i89]}"
+	[[ "${LVFSTYPE[i89]}" = 'lv' ]] && nm89="${LVGROUP[i89]}-$nm89"
+	[[ -n "$logs_flag" ]] && nm89="tar.$nm89"
+	lst89="$lst89$nm89|"
+	i89="$((i89+1))"
+    done    
+    [[ -n "$lst89" ]] && lst89="${lst89%|}"
+
+    eval "$outvar89"'="$lst89"'
+    return 0
+    
+}
+
+
+# check_previous_backups()
+#   if backup level is greater than zero then check that all backups of lower
+#   level exist, check the backups of all filesystems specified in the
+#   LVFS..., LV... and FS... array variables
+# return: exit - all backups of lower level do not exist
+#         0 - ok or clean exit in progress
+check_previous_backups() {
+
+    [[ "$CE_RUNNING" = 0 ]] && return 0
+
+    local fstrun=0
+    local l i type name file
+    local level="$ARG_LEVEL" eqstr
+
+    eqstr='than'
+    [[ "$ARG_MODE" = 'check' ]] && level="$((level+1))" && eqstr='or equal to'
+
+    if [[ "$level" -gt 0 ]]; then
+
+	for ((l=0; "$l" < "$level"; l++)); do
+
+	    i=0
+	    type="${LVFSTYPE[0]}"
+	    while [[ -n "$type" ]]; do
+		name="${LVFSNAME[i]}"
+		[[ "$type" = 'lv' ]] && name="${LVGROUP[i]}-$name"
+
+		for file in "$name.$l.tgz" "$name.$l.snar"; do
+		    if [[ ! -f "$ARG_OUTDIR/cache/$file" ]]; then
+			if [[ "$fstrun" = 0 ]]; then
+			    echo "$PROGNAME: the following incremental archives with level lower $eqstr $ARG_LEVEL" >&2
+			    echo "$PNSPACES  must exist in the directory '$ARG_OUTDIR/cache'" >&2
+			    echo "$PNSPACES  otherwise you wouldn't be able to list or restore the backups" >&2
+			    fstrun=1
+			fi
+			echo "  '$file'" >&2
+		    fi
+		done
+
+		type="${LVFSTYPE[++i]}"
+	    done
+	done
+    fi
+    
+    [[ "$fstrun" != 0 ]] && clean_exit 2
+    return 0
+    
+}
+
+
+# check_subsequent_backups()
+#   check that no backups of the same or higher level than the current level
+#   exist, if so either exit (default) or delete those backups (-f switch
+#   given), check the backups of all filesystems specified in the LVFS...,
+#   LV... and FS... array variables
+# return: exit - some backups of the same or higher level exist (default)
+#                or cannot be deleted (-f switch given)
+#         0 - ok or clean exit in progress
+check_subsequent_backups() {
+
+    [[ "$CE_RUNNING" = 0 ]] && return 0
+
+    local f flevel
+    local fstrun=0 delnum
+    local nameorlst
+
+    [[ "$ARG_V" = 'y' && "$ARG_F" = 'y' ]] \
+	&& echo "$PROGNAME: deleting the following backup archives"
+
+    get_lvfsnameorlst nameorlst
+    delnum=0
+    for f in \
+	$(ls -1 "$ARG_OUTDIR/cache" \
+	| grep -E '^('"$nameorlst"')[.][0-9]+[.](tgz|snar)$')
+    do
+
+	flevel=$(echo "$f" | sed -nr 's#^.*[.]([0-9]+)[.][a-z]+$#\1#p')
+	if [[ "$flevel" -ge "$ARG_LEVEL" ]]; then
+
+	    if [[ "$ARG_F" != 'y' ]]; then
+
+		if [[ "$fstrun" = 0 ]]; then
+		    echo "$PROGNAME: the following backups of the same or higher level than $ARG_LEVEL already" >&2
+		    echo "$PNSPACES  exist in the directory '$ARG_OUTDIR/cache', either increase" >&2
+		    echo "$PNSPACES  the backup level or use the -f switch to delete those archives"
+		    fstrun=1
+		fi
+		echo "  '$f'" >&2
+
+	    else
+
+		[[ "$ARG_V" = 'y' ]] \
+		    && echo "  '$f'"
+		rm -f "$ARG_OUTDIR/cache/$f"
+		if [[ "$?" -eq 0 ]]; then
+		    delnum="$((delnum+1))"
+		else
+		    echo "$PROGNAME: cannot delete '$ARG_OUTDIR/cache/$f'" >&2
+		    fstrun=1
+		fi
+
+	    fi
+
+	fi
+
+    done
+
+    [[ "$ARG_V" = 'y' && "$ARG_F" = 'y' ]] \
+	&& echo "$PROGNAME: $delnum backup archive(s) deleted"
+
+    [[ "$fstrun" != 0 ]] && clean_exit 2
+    return 0
+    
+}
+
+
+# delete_subsequent_logs()
+#   delete the logs of the same or higher level than the current level,
+#   check the logs of all backups of filesystems specified in the
+#   LVFS..., LV... and FS... array variables
+# return: exit - some logs of the same or higher level than the current level
+#                cannot be deleted
+#         0 - ok or clean exit in progress
+delete_subsequent_logs() {
+
+    [[ "$CE_RUNNING" = 0 ]] && return 0
+
+    local f flevel
+    local cntrun=0 delnum
+    local nameorlst
+
+    [[ "$ARG_V" = 'y' ]] \
+	&& echo "$PROGNAME: deleting the following logs"
+
+    get_lvfsnameorlst nameorlst logs
+    delnum=0
+    for f in \
+	$(ls -1 "$ARG_OUTDIR/log" \
+	| grep -E '^(df|'"$nameorlst"')[.][0-9]+[.]log$')
+    do
+	flevel=$(echo "$f" | sed -nr 's#^.*[.]([0-9]+)[.][a-z]+$#\1#p')
+	if [[ "$flevel" -ge "$ARG_LEVEL" ]]; then
+
+	    [[ "$ARG_V" = 'y' ]] \
+		&& echo "  '$f'"
+
+	    rm -f "$ARG_OUTDIR/log/$f"
+	    if [[ "$?" -eq 0 ]]; then
+		delnum="$((delnum+1))"
+	    else
+		echo "$PROGNAME: cannot delete '$ARG_OUTDIR/log/$f'" >&2
+		cntrun=1
+	    fi
+
+	fi
+    done
+
+    [[ "$ARG_V" = 'y' ]] \
+	&& echo "$PROGNAME: $delnum log(s) deleted"
+
+    [[ "$cntrun" != 0 ]] && clean_exit 2
+    return 0
+    
+}
+
+
+# log() verbose msg
+#   log message msg to standard error if verbose equals to 'y'
+# return: 0 - ok
+log() {
+
+    local verbose="$1" msg="$2"
+    local ec=0
+
+    [[ "$verbose" = 'y' ]] && echo "$msg" >&2
+
+    return "$ec"
+
+}
+
+
+# backup()
+#   mount, backup and unmount all the specified filesystems and create logs,
+#   the filesystems are specified in the LVFS..., LV... and FS... array
+#   variables
+# return: 0 - ok, backup was done
+#         1 - error occured during the backup, backup aborted
+backup() {
+
+    local i ex ret
+    local type name dev uuid exclude
+    local df_fail mounted abort
+    local argv
+    local fstype acl acls
+
+    local dflog="$ARG_OUTDIR/log/df.$ARG_LEVEL.log"
+    local bklog
+    
+    # set the flag passed to log function, i.e. verbose output
+    # on stderr or log only?
+    if [[ "$ARG_V" = 'y' ]]; then
+	argv='y'
+    else
+	argv='n'
+    fi
+
+    # get the header line from df and write it to the df log
+    df_fail=1
+    if ! df -h "$WORKDIR/mnt" \
+        | grep -E '^Filesystem[[:blank:]]+.*[[:blank:]]+Mounted on$' >"$dflog";\
+    then
+	echo "$PROGNAME: cannot get filesystem disk space usage information from df," >&2
+	echo "$PNSPACES  the df log '$dflog'" >&2
+	echo "$PNSPACES  will not exist or will be empty" >&2
+	df_fail=0
+    fi
+
+    # backup
+    abort=1
+    i=0
+    type="${LVFSTYPE[0]}"
+    while [[ -n "$type" ]]; do
+	mounted=1
+
+	if [[ "$type" = 'lv' ]]; then
+	    name="${LVGROUP[i]}-${LVFSNAME[i]}"
+	    dev="/dev/${LVGROUP[i]}/${LVFSNAME[i]}$LVSNAPSUFFIX"
+	else
+	    name="${LVFSNAME[i]}"
+	    if echo "${FSDEV[i]:0:5}" | grep -qi '^UUID=$'; then
+		uuid="$(echo "${FSDEV[i]}" | sed -r 's#^....=##')"
+		dev="$(get_uuid_device "$uuid")"
+		if [[ -z "$dev" || ! -b "$dev" ]]; then
+		    echo "$PROGNAME: block device with uuid '$uuid' not found" >&2
+		    return 1
+		fi
+	    else
+		dev="${FSDEV[i]}"
+		if [[ -z "$dev" || ! -b "$dev" ]]; then
+		    echo "$PROGNAME: block device '$dev' not found" >&2
+		    return 1
+		fi
+	    fi
+	fi
+
+	bklog="$ARG_OUTDIR/log/tar.$name.$ARG_LEVEL.log"	
+
+	# set the acls options (for mount and tar)
+	fstype="$(get_fs_type "$dev")"	
+	acl=''
+	acls=''
+	if [[ "$NOACLS" != 'true' ]]; then
+	    echo "$fstype" | grep -Eq '^ext[234]$'
+	    [[ $? -eq 0 ]] && acl=',acl'
+
+	    acls='--acls'
+	fi
+
+	# assign the list of directories to exclude to the exclude variable
+	# (the eval is needed because LVFSEXCLUDE[i] is a whitespace separated
+	# list of files/directories to exclude enclosed in single quotes)
+           # the nasty expression in ex assignment ensures that inner ' is
+	   # replaced by '"'"' in the eval so that another eval can be used
+           # once again later in the tar command
+	exclude=''
+	eval 'for ex in '"${LVFSEXCLUDE[i]}"'; do
+           ex=$(echo "$ex" | sed '"'s#'\"'\"'#'\"'\"\\\"\"'\"\\\"\"'\"'#g'"')
+	   exclude="$exclude --exclude='"'"'$ex'"'"'"
+	done'
+
+	# mount the device/volume to backup
+	# get df log info
+	# copy (don't overwrite) the snar archive
+	# run tar with proper arguments, i.e. create the incremental backup
+	log "$argv" "$PROGNAME: backing up the '$name' filesystem" \
+          && log "$argv" "$PROGNAME: mounting '$name', i.e. '$dev' filesystem" \
+	  && mount -o ro,noexec,nodev,nosuid"$acl" "$dev" "$WORKDIR/mnt" \
+          && mounted=0 \
+          && if [[ "$df_fail" != 0 ]]; then
+              log "$argv" "$PROGNAME: getting filesystem disk space usage information" \
+		  && df -h "$WORKDIR/mnt" \
+		      | grep -vE '^Filesystem[[:blank:]]+.*[[:blank:]]+Mounted on$' \
+		      >>"$dflog"
+             fi \
+	  && if [[ "$ARG_LEVEL" -gt 0 ]]; then
+               log "$argv" "$PROGNAME: copying snar archive level $((ARG_LEVEL-1)) to level $ARG_LEVEL" \
+               && cp "$ARG_OUTDIR/cache/$name.$((ARG_LEVEL-1)).snar" \
+                     "$ARG_OUTDIR/cache/$name.$ARG_LEVEL.snar"
+	     fi \
+          && if [[ "${#LVFSEXCLUDE[i]}" -gt 0 ]]; then
+               log "$argv" "$PROGNAME: excluding following files/directories from the backup" \
+               && eval 'for ex in '"${LVFSEXCLUDE[i]}"'; do
+                          [[ "$?" -eq 0 ]] \
+                            && log "argv" "  '"'"'$ex'"'"'"
+                        done'
+	     fi \
+          && log "$argv" "$PROGNAME: using tar to archive '$name' filesystem" \
+          && eval 'tar -cvvzf "$ARG_OUTDIR/cache/$name.$ARG_LEVEL.tgz" \
+                     -g "$ARG_OUTDIR/cache/$name.$ARG_LEVEL.snar" \
+                     -C "$WORKDIR/mnt" \
+                     --sparse \
+                     '"$acls"' \
+                     --atime-preserve=system \
+                     --one-file-system \
+                     --exclude=./lost+found '"$exclude"'\
+                     . \
+                     >"$bklog"'
+
+	# log failure and abort the backup if some operation failed
+	if [[ "$?" != 0 ]]; then
+            echo "$PROGNAME: last operation failed, aborting the backup" >&2
+	    echo "$PROGNAME: backing up '$name' filesystem failed, see logs" >&2
+	    abort=0
+	fi
+
+	# if the processed device was mounted then unmount it
+	if [[ "$mounted" = 0 ]]; then
+	    log "$argv" "$PROGNAME: unmounting '$name', i.e. '$dev' filesystem"
+	    if ! umount "$WORKDIR/mnt"; then
+		echo "$PROGNAME: cannot unmount '$dev', aborting the backup," >&2
+		echo "$PNSPACES  run umount manually" >&2
+		abort=0
+	    fi
+	fi
+
+	if [[ "$abort" != 0 ]]; then
+	    log "$argv" "$PROGNAME: filesystem '$name' backed up successfully"
+	else
+	    return 1
+	fi
+
+	type="${LVFSTYPE[++i]}"
+    done
+
+    return 0
+    
+}
+
+
+# pre()
+#   pre command mode - prepare the system for the backup, i.e. remount all
+#   filesystems to backup read-only, create lvm snapshots and remount lvm
+#   filesystems back read-write
+# return: 0 - ok
+#         1 - filesystems cannot be remounted ro or snapshots cannot be created
+pre() {
+
+    local cont=0
+
+    # remount all rw lvm filesystems ro
+    if [[ "$cont" = 0 ]]; then
+	remount_rwlv_ro
+	cont="$?"
+    fi
+
+    # create lvm snapshots
+    if [[ "$cont" = 0 ]]; then
+	create_lvsnap
+	cont="$?"
+    fi
+
+    # remount all rw non-lvm filesystems ro - this is done as the last
+    # operation because if lvm metadata backups are stored on an non-lvm
+    # filesystem, they must be writeable in order to create snapshots
+    if [[ "$cont" = 0 ]]; then
+	remount_rwfs_ro
+	cont="$?"
+    fi
+
+    # lvm snapshosts are created, mount the lvm filesystems back rw again
+    if [[ "$cont" = 0 ]]; then
+	remount_rwlv_rw
+    else
+    # or revert to the original state after an error
+	[[ "${#RWFS[*]}" -gt 0 || "${#SNLV[*]}" -gt 0 || "${#RWLV[*]}" -gt 0 ]] \
+	    && echo "$PROGNAME: error occured, reverting to the original state" >&2
+
+	[[ "${#RWFS[*]}" -gt 0 ]] && remount_rwfs_rw
+	[[ "${#SNLV[*]}" -gt 0 ]] && remove_lvsnap
+	[[ "${#RWLV[*]}" -gt 0 ]] && remount_rwlv_rw
+    fi
+
+    return "$((cont==0 ? 0 : 1))"
+    
+}
+
+
+# post()
+#   post command mode - finalize the backup, i.e. remount all non-lvm
+#   filesystems back read-write and remove lvm snapshots
+# return: 0 - ok
+#         1 - some filesystems not remounted or some snapshots not removed
+post() {    
+
+    local ec=0
+
+    # remount all non-lvm filesystems that were mounted rw during the pre phase
+    # and were remounted ro back rw
+    remount_rwfs_rw_post
+    [[ "$?" -ne 0 ]] && ec=1
+
+    # remove all snapshots of lvm logical volumes created during the pre phase
+    remove_lvsnap_post
+    [[ "$?" -ne 0 ]] && ec=1
+
+    return "$ec"
+    
+}
+
+
+# run()
+#   run the incremental backup of the level ARG_LEVEL and create logs
+# return: exit - all incremental backups of lower level do not exist, some
+#                incremental backups of the same or higher level exist and
+#                shouldn't be deleted (-f switch not given) or the deletion
+#                of such backups or logs failed (-f switch given)
+#         0 - ok
+#         1 - backup failed
+run() {
+       
+    local ec=0
+
+    # check that all incremental backups of lower level than ARG_LEVEL exist
+    check_previous_backups
+
+    # check that no incremental backups of the same or higher level than
+    # ARG_LEVEL exist and optionally delete them
+    check_subsequent_backups
+
+    # delete the backup logs of the same or higher level than ARG_LEVEL
+    delete_subsequent_logs
+
+    # mount, backup and unmount the filesystems, also log the backup
+    backup
+    [[ "$?" -ne 0 ]] && ec=1
+
+    return "$ec"
+    
+}
+
+
+# check() level
+#   check that all backup archives of the specified level and of all preceding
+#   level exist
+# return: 0 - ok or clean exit in progress
+#         1 - some of the backup archives not found
+check() {
+
+    [[ "$CE_RUNNING" = 0 ]] && return 0
+
+    # check that all incremental backups of lower level than ARG_LEVEL exist
+    check_previous_backups
+
+    return 0
+
+}
+
+
+# clean()
+#   clean command mode - perform cleanup, i.e. unmount filesystem to backup
+#   from its backup mount point, remove lvm snapshots, remount both fs and
+#   lvm filesystems back read-write, remove proc mounts or tmpfs filesystem
+# return: 0 - ok
+#         1 - filesystem to backup not unmounted, some snapshots not removed,
+#             some filesystems not remounted back read-write or proc mounts
+#             copy not removed
+clean() {    
+
+    local ec=0
+
+    # unmount backup mountpoint if mounted
+    grep -Eq "^[[:blank:]]*[^[:blank:]]+[[:blank:]]+$WORKDIR/mnt[[:blank:]]" /proc/mounts
+    if [[ $? -eq 0 ]]; then
+	[[ "$ARG_V" = y ]] \
+	    && echo "$PROGNAME: unmounting '$WORKDIR/mnt'"
+	if ! umount "$WORKDIR/mnt"; then
+	    echo "$PROGNAME: cannot unmount '$WORKDIR/mnt'," >&2
+	    echo "$PNSPACES  run umount manually" >&2
+	    ec=1
+	fi
+    fi
+	    
+    # remount both fs and lvm filesystems back rw if /proc/mounts copy exists
+    check_proc_mounts 'copy'
+    if [[ $? -eq 0 ]]; then
+
+	# remount all non-lvm filesystems that were mounted rw during the pre
+	# phase and were remounted ro back rw
+	remount_rwfs_rw_post
+	[[ "$?" -ne 0 ]] && ec=1
+
+	# remount all non-lvm filesystems that were mounted rw during the pre
+	# phase and were remounted ro back rw
+	remount_rwlv_rw_clean
+	[[ "$?" -ne 0 ]] && ec=1
+
+    fi
+
+    # remove all snapshots of lvm logical volumes created during the pre phase
+    remove_lvsnap_post
+    [[ "$?" -ne 0 ]] && ec=1
+    
+    # unmount tmpfs filesystem if mounted
+    umount_tmpfs
+    [[ "$?" -ne 0 ]] && ec=1
+    
+    # remove_proc_mounts
+    remove_proc_mounts
+    [[ "$?" -ne 0 ]] && ec=1
+
+    return "$ec"
+    
+}
+
+
+###### MAIN ###################################################################
+
+### check if all the external tools are available on the system
+check_tools sed grep id ps cat rm mkdir mount umount true sort date cp find \
+	    awk head readlink tr ls df tar
+
+### parse and check arguments, run initialization
+
+parse_args "$@"
+check_args
+
+[[ "$ARG_MODE" = 'help' ]] && usage
+
+# check if the script is called by root
+check_root_id
+
+# check if the script is not running yet
+check_if_running
+
+# check that the working directory is all right
+check_work_dir "$ARG_MODE"
+
+# check that readable /proc/mounts exists
+check_proc_mounts 'real'
+
+# mount the tmpfs filesystem which is always read/write
+mount_tmpfs "$TMPFS_SIZE"
+
+# read the configuration file and check configuration afterwards
+read_config_file "$CONFFILE"
+check_config
+
+# create uuid file that maps block devices to their uuids
+create_uuid_file "$UUID_FILE"
+    
+# check add-on tools presence
+check_addon_tools
+
+# default exit code
+EC=0
+
+get_timestamp
+[[ "$ARG_MODE" != 'clean' && "$ARG_MODE" != 'check' ]] \
+    && add_exit_cmd 'print_result'
+add_exit_cmd 'get_timestamp'
+
+
+### PRE
+
+if [[ "$ARG_MODE" = 'pre' ]]; then
+
+    # store /proc/mounts so that it can be recognized later in the post
+    # mode how to remount the filesystems back
+    store_proc_mounts
+
+    # main pre functionality
+    pre
+    if [[ "$?" -ne 0 ]]; then
+	remove_proc_mounts
+	EC=4
+    fi
+
+### RUN
+
+elif [[ "$ARG_MODE" = 'run' ]]; then
+
+    # check that a copy of /proc/mounts is available in the tmp workdir,
+    # this indicates that this command in the pre command mode was called
+    # successfully before
+    check_proc_mounts 'copy'
+
+    # check output directory
+    check_outdir
+
+    # main run functionality - i.e. the backup
+    run
+    [[ "$?" -ne 0 ]] && EC=4
+
+### POST
+
+elif [[ "$ARG_MODE" = 'post' ]]; then
+
+    # check that the /proc/mounts file and its copy stored during
+    # the preceding pre phase are available
+    check_proc_mounts 'real'
+    check_proc_mounts 'copy'
+
+    # main post functionality
+    post
+    [[ "$?" -ne 0 ]] && EC=4
+
+    # remove_proc_mounts
+    remove_proc_mounts
+    [[ "$?" -ne 0 ]] && EC=4
+
+### CHECK
+
+elif [[ "$ARG_MODE" = 'check' ]]; then
+
+    # main check functionality
+    check
+    [[ "$?" -ne 0 ]] && EC=4
+
+### CLEAN
+
+elif [[ "$ARG_MODE" = 'clean' ]]; then
+
+    # main clean functionality
+    clean
+    [[ "$?" -ne 0 ]] && EC=4
+
+fi
+
+
+### exit
+[[ "$EC" = 0 ]] && RESULT='OK'
+clean_exit "$EC"

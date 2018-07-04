@@ -1,0 +1,1188 @@
+#!/bin/bash
+
+###############################################################################
+#
+# script: ssd-backup
+# author: Lukas Baxa alias Baxic <baxic-cs@seznam.cz>
+#
+# This script is free software; you can redistribute it and/or modify it
+# under the terms of the GNU General Public License as published by the
+# Free Software Foundation; either version 3, or (at your option) any later
+# version.
+#
+###############################################################################
+
+
+# set program name
+PROGNAME='ssd-backup'
+PNSPACES='          '
+
+# set versions
+SCRIPT_VERSION='00.21'
+SUITE_VERSION='00.80'
+
+# set configuration directory and default configuration file
+WORKDIR="/var/local/$PROGNAME"
+CONFFILE_DEFAULT="/usr/local/etc/$PROGNAME.conf"
+
+# set default values that might be redefined in the configuration file
+unset NOSYSV
+unset NOSYSTEMD
+unset SSTYPE
+unset SSINIT
+unset SSOPTS
+unset KILLPS
+SURVRUSERS=root
+STOPCOMMS_N=0
+STARTCOMMS_N=0
+
+
+# check_tools() tool1 ... toolN
+#   check if all the external tools tool1 ... toolN are available on the system
+# return: exit - some of the tools are missing
+#         0 - ok
+check_tools() {
+
+    local fail fst
+    local tool
+    
+    if ! which which >/dev/null 2>&1; then
+	echo "$PROGNAME: cannot find the 'which' command that is necessary" >&2
+	exit 2
+    fi
+
+    fail=1
+    fst=0
+    for tool in "$@"; do
+	if ! which "$tool" >/dev/null 2>&1; then
+	    if [[ "$fst" = 0 ]]; then
+		echo "$PROGNAME: cannot find the following tools/commands that are necessary" >&2
+		fst=1
+	    fi
+	    echo "  '$tool'" >&2
+	    fail=0
+	fi
+    done
+
+    [[ "$fail" = 0 ]] && exit 2
+    return 0
+
+}
+
+
+# usage() [exit_code]
+#   print the usage info and exit with given exit code (default 0)
+# return: exit
+usage() {
+
+    local ec="${1:-0}"
+    if [[ "$ec" != 0 ]]; then
+	exec >&2
+    fi
+
+    echo "$PROGNAME - stop/start daemons before/after backup"
+    echo
+    echo "    ($PROGNAME version: $SCRIPT_VERSION, tar-lvm suite version: $SUITE_VERSION)"    
+    echo
+    echo "usage: $PROGNAME -h|help"
+    echo "       $PROGNAME [-u] [-v] [-f] [-c cfgfile] (stop|start)"
+    echo "       $PROGNAME [-v] [-c cfgfile] clean"
+    echo
+    echo '    -h|help ... print help and exit'
+    echo '    stop ... stop the sysv/systemd services and kill the processes'
+    echo '             specified in the config file'
+    echo '    start|clean ... start the sysv/systemd services specified'
+    echo '                    in the config file'
+    echo '    -u ... kill also all user processes (stop mode only) and'
+    echo '           restrict/permit user logins by creating/removing'
+    echo "           the file '/var/run/nologin'"
+    echo '    -f ... force start/stop action for all configured services'
+    echo '           irrespective of their initial status'
+    echo '    -v ... verbosely print what is done'
+    echo '    -c cfgfile ... path to the non-default configuration file'
+    echo "                   (default: '$CONFFILE_DEFAULT')"
+    echo
+
+    exit "$ec"
+
+}
+
+
+# parse_args() arg1 ... argN
+#   parse the command-line arguments and set the global variables ARG_MODE,
+#   ARG_U, ARG_V, ARG_F, ARG_C and ARG_C_VAL
+# return: exit - wrong arguments are given
+#         0 - ok
+parse_args() {
+
+    local arg
+
+    ARGNUM=0
+    ARG_MODE=''    
+
+    ARG_U='n'
+    ARG_V='n'
+    ARG_F='n'
+    ARG_C='n'
+    unset ARG_C_VAL
+
+    unset argvalfor
+    for arg in "$@"; do
+
+	if [[ -z "$argvalfor" ]]; then
+	    
+	    case "$arg" in
+		'-v')
+		    [[ "$ARG_V" = 'y' ]] && usage 1
+		    ARG_V='y' 
+		    ;;
+		'-u') 
+		    [[ "$ARG_U" = 'y' ]] && usage 1
+		    ARG_U='y'
+		    ;;
+		'-f')
+		    [[ "$ARG_F" = 'y' ]] && usage 1
+		    ARG_F='y' 
+		    ;;
+		'-c')
+		    [[ "$ARG_C" = 'y' ]] && usage 1
+		    ARG_C='y'
+		    argvalfor='-c'
+		    ;;
+		*)
+		    if [[ "${arg:0:1}" = '-' \
+				&& ( "$arg" != '-h' || "$ARGNUM" -gt 0 ) ]]
+		    then
+			usage 1
+		    else		
+			ARGNUM="$((ARGNUM+1))"
+			case "$ARGNUM" in
+			    1)  
+				case "$arg" in
+				    '-h' | 'help') 
+					ARG_MODE='help'
+					;;
+				    'stop' | 'start' | 'clean')
+					ARG_MODE="$arg"
+					;;
+				    *)
+					usage 1
+					;;
+				esac
+				;;
+			    *)
+				usage 1
+				;;
+			esac
+		    fi
+		    ;;
+	    esac
+
+	else
+
+	    case "$argvalfor" in
+		'-c')
+		    ARG_C_VAL="$arg";
+		    ;;
+		*)
+		    usage 1
+		    ;;
+	    esac
+
+	    unset argvalfor
+
+	fi
+	
+    done
+
+    [[ -n "$argvalfor" ]] && usage 1
+
+    if [[ -z "$ARG_MODE" ]]; then
+	usage 1
+    elif [[ "$ARG_MODE" = 'help' ]]; then
+	[[ "$ARGNUM" -ne 1 || "$ARG_V" = 'y' || "$ARG_U" = 'y' ]] && usage 1
+    elif [[ "$ARG_MODE" = 'stop' || "$ARG_MODE" = 'start' ]]; then
+	[[ "$ARGNUM" -ne 1 ]] && usage 1
+    elif [[ "$ARG_MODE" = 'clean' ]]; then
+	[[ "$ARGNUM" -ne 1 || "$ARG_U" = 'y' || "$ARG_F" = 'y' ]] && usage 1
+    fi
+
+    if [[ "$ARG_MODE" = 'clean' ]]; then
+	ARG_U='y'
+    fi
+    
+    return 0	
+
+}
+
+
+# add_exit_cmd exit_cmd
+#   add exit command to be invoked when clean_exit is invoked, the command
+#   is just one argument to be invoked via eval
+# return: 0 - ok
+add_exit_cmd() {
+
+    local cmd="$1"
+    local i
+
+    i="${#EXIT_CMDS[@]}"
+    EXIT_CMDS[i]="$cmd"
+
+    return 0;
+
+}
+
+
+# del_exit_cmd [exit_cmd_number]
+#   remove exit command to be invoked when clean_exit is invoked, the command
+#   number can be specified, if it is not, the last command is removed if any
+# return: 0 - ok
+del_exit_cmd() {
+
+    local i="$1"
+    local j
+
+    if [[ "${#EXIT_CMDS[@]}" -gt 0 ]]; then
+	
+	if [[ -z "$i" ]]; then
+	    j="$(( ${#EXIT_CMDS[@]} - 1 ))"
+	    unset EXIT_CMDS[j]
+	else
+	    EXIT_CMDS[i]=''
+	fi
+
+    fi
+    
+    return 0;
+
+}
+
+
+# run_exit_cmds
+#   invoke all registered exit commands in the opposite order in which they
+#   were registered, but do not actually exit, then remove all exit commands
+# return: 0 - ok
+#         1 - some exit command failed
+run_exit_cmds() {
+
+    local i n
+    local cmd
+    local eval_ec ec=0
+
+    n="${#EXIT_CMDS[@]}"
+    for ((i=n-1; i>=0; i--)); do
+
+	cmd="${EXIT_CMDS[i]}"
+	if [[ -n "$cmd" ]]; then
+	    eval "$cmd"
+	    eval_ec="$?"
+	fi
+
+	if [[ "$eval_ec" -ne 0 ]]; then
+	    ec=1
+	fi
+
+    done
+
+    unset EXIT_CMDS
+    
+    return "$ec"
+    
+}
+
+
+# clean_exit [ec]
+#   exit cleanly, i.e. invoke all registered exit commands before exiting
+#   in the opposite order in which they were registered, the exit commands
+#   can be (de)registered by using add_exit_cmd/del_exit_cmd, finally,
+#   exit with the given exit code or with 1 if no exit code is given
+#   and some command fails
+# return: exit
+clean_exit() {
+
+    local ec_orig="${1:-0}"
+    local i n
+    local cmd
+    local ec=0
+
+    CE_RUNNING=0
+
+    run_exit_cmds
+    [[ "$?" -ne 0 ]] && ec=1
+    
+    [[ "$ec_orig" = 0 && "$ec" != 0 ]] && ec_orig="$ec"
+    exit "$ec_orig"
+
+}
+
+
+# check_root_id()
+#   check that the command is called by root
+# return: exit - the command is not called by root
+#         0 - ok
+check_root_id() {
+
+    if [[ $(id -u) != 0 ]]; then
+	echo "$PROGNAME: you must be root in order to use this script" >&2
+	clean_exit 2
+    fi
+
+    return 0
+
+}
+
+
+# check_work_dir
+#   check that the working directory and has proper access permissions
+# return: exit - the working directory isn't all right
+#         0 - ok
+check_work_dir() {    
+
+    local ok=0
+
+
+    if [[ ! -d "$WORKDIR" || ! -r "$WORKDIR" || ! -w "$WORKDIR" ]]; then
+	echo "$PROGNAME: the directory '$WORKDIR' doesn't exist or" >&2
+	echo "$PNSPACES  isn't readable and writable" >&2
+	ok=1
+    fi
+
+    [[ "$ok" != 0 ]] && clean_exit 2
+
+    return 0
+    
+}
+
+
+# get_command() outarr ('startcomm'|'stopcomm') command arg1 ... argN
+#   get command with optional arguments and store it as the last entry
+#   of the array variable with name outarr
+# return: 0 - ok
+get_command() {
+
+    local outarr="$1"
+
+    shift 2
+    eval $outarr='("$@")'
+
+    return 0
+
+}
+
+
+# read_config_file cfg_file
+#   read the configuration file cfg_file, each line of the configuration file
+#   which is not a comment consists of whitespace separated words, the words
+#   can be optionally enclosed in double quotes and can therefore also contain
+#   whitespace characters - space, tab, double quote and backslash may be part
+#   of a word too if they're escaped by a backslash, lines starting with #
+#   (optional whitespaces may precede #) are comments, currently only
+#   the nosysv, nosystemd, survruser, stopstart, kill, startcomm and stopcomm
+#   lines are supported, they are used to define the NOSYSV, NOSYSTEMD,
+#   SURVRUSERS, SSINIT, SSTYPE, SSOPTS, KILLPS, STOPCOMMS_* and STARTCOMMS_*
+#   global variables
+# return: exit -  the config file isn't readable or doesn't have correct format
+#         0 - ok
+read_config_file() {
+
+    local cfg_file="$1" cfg_cont
+    local linenum line str fch wrd
+    local ifs
+    local n i
+    local err opts
+    local isnosysv=1 isnosystemd=1
+
+    # check that the config file exists and is readable
+    if [[ -f "$cfg_file" && -r "$cfg_file" ]]; then
+	cfg_cont="$(cat "$cfg_file")"
+    else	
+	echo "$PROGNAME: cannot read the configuration file '$cfg_file'" >&2
+	clean_exit 2
+    fi
+
+    # remove space, tab and newline from IFS so that the whole line
+    # including the leading whitespace is read by the read built-in
+    ifs="$IFS"
+    IFS=''
+
+    # read and process all lines from the file cfg_file
+    linenum=0
+    while read -r line; do
+	linenum="$((linenum+1))"
+
+	unset args
+	local -a args
+
+	# remove comments, i.e. lines beginning with #, optional whitespace
+        # may precede the # character
+	str="$(echo "$line" | sed -r 's/^([[:blank:]]*)#.*$/\1/')"
+
+	# read words from the line read and store them into the args array
+	while true; do
+
+	    # remove leading whitespace
+	    str="$(echo "$str" | sed -nr 's#^[[:blank:]]*(.*)?$#\1#p')"
+
+	    # if there is no first character, i.e. no word, then break
+	    fch="${str:0:1}"
+	    if [[ -z "$fch" ]]; then
+		break
+
+	    # if the first character isn't ", the word is delimited
+	    # by whitespace that is not escaped by \
+	    elif [[ "$fch" != '"' ]]; then
+		wrd=$(echo "$str" | sed -nr 's#^(([^[:blank:]"\\]*[\\][[:blank:]"\\])*[^[:blank:]"\\]*)([[:blank:]]+(.*))?$#\1#p')
+		str=$(echo "$str" | sed -nr 's#^(([^[:blank:]"\\]*[\\][[:blank:]"\\])*[^[:blank:]"\\]*)([[:blank:]]+(.*))?$#\4#p')
+
+	    # if the first character is ", the word is delimited by
+	    # double quotes that are not escaped by \ and the quoted words
+	    # by whitespace
+            elif [[ "$fch" = '"' ]]; then
+		wrd=$(echo "$str" | sed -nr 's#^"(([^"\\]*[\\][[:blank:]"\\])*[^"\\]*)"([[:blank:]]+(.*))?$#\1#p')
+		str=$(echo "$str" | sed -nr 's#^"(([^"\\]*[\\][[:blank:]"\\])*[^"\\]*)"([[:blank:]]+(.*))?$#\4#p')
+	    fi
+
+	    # replace all characters escaped by \ in the word read
+            wrd="$(echo "$wrd" | sed -r 's#[\\]([[:blank:]"\\])#\1#g')"
+
+	    # store the resulting word into the args array
+	    args[${#args[*]}]="$wrd"
+	done
+
+	# if the line has at least one word, check if it is correct and
+        # assign values to appropriate variables
+	if [[ ${#args[*]} -gt 0 ]]; then
+
+	    err=1
+	    case "${args[0]}" in
+
+		'nosysv')
+		    if [[ "$isnosysv" = 0 ]]; then
+			echo "$PROGNAME: nosysv defined multiple times in the config file" >&2
+			clean_exit 2
+		    fi
+		    isnosysv=0
+		    if [[ ${#args[*]} -lt 2 || -z "${args[1]}" ]]; then
+			echo "$PROGNAME: incorrect format of the config line number $linenum:" >&2
+			echo "$line" >&2
+			clean_exit 2
+		    fi
+		    NOSYSV="${args[1]}"
+		    ;;
+
+		'nosystemd')
+		    if [[ "$isnosystemd" = 0 ]]; then
+			echo "$PROGNAME: nosystemd defined multiple times in the config file" >&2
+			clean_exit 2
+		    fi
+		    isnosystemd=0
+		    if [[ ${#args[*]} -lt 2 || -z "${args[1]}" ]]; then
+			echo "$PROGNAME: incorrect format of the config line number $linenum:" >&2
+			echo "$line" >&2
+			clean_exit 2
+		    fi
+		    NOSYSTEMD="${args[1]}"
+		    ;;
+		    
+		'stopstart')
+		    [[ ${#args[*]} -lt 3 || ${#args[*]} -gt 4 ||
+			     -z "${args[1]}" ||
+			     ( "${args[1]}" != 'systemd' && "${args[1]}" != 'sysv' ) ||
+			     -z "${args[2]}" ]] && err=0
+		    opts="$(echo "${args[3]}" | tr ',' '\n')"
+		    [[ "$(echo "$opts" | grep -Ev '^pidfile=|psname=' | wc -l)" -gt 2 ]] && err=0
+		    [[ "$(echo "$opts" | grep -Ev '^pidfile=' | wc -l)" -gt 1 ]] && err=0
+		    [[ "$(echo "$opts" | grep -Ev '^psname=' | wc -l)" -gt 1 ]] && err=0
+		    if [[ "$err" = 0 ]]; then
+			echo "$PROGNAME: incorrect format of the config line number $linenum:" >&2
+			echo "$line" >&2
+			clean_exit 2
+		    fi
+		    n="${#SSINIT[*]}"
+		    SSTYPE[n]="${args[1]}"
+
+		    		    SSINIT[n]="${args[2]}"
+		    SSOPTS[n]="${args[3]}"
+		    ;;
+
+		'kill')
+		    if [[ ${#args[*]} -ne 2 || -z "${args[1]}" ]]; then
+			echo "$PROGNAME: incorrect format of the config line number $linenum:" >&2
+			echo "$line" >&2
+			clean_exit 2
+		    fi
+		    n="${#KILLPS[*]}"
+		    KILLPS[n]="${args[1]}"
+		    ;;
+
+		'survruser')
+		    if [[ ${#args[*]} -ne 2 || -z "${args[1]}" ]]; then
+			echo "$PROGNAME: incorrect format of the config line number $linenum:" >&2
+			echo "$line" >&2
+			clean_exit 2
+		    fi
+		    if [[ -z "$SURVRUSERS" ]]; then
+			SURVRUSERS="${args[1]}"
+		    else
+			SURVRUSERS="$SURVRUSERS|${args[1]}"
+		    fi
+		    ;;
+
+		'stopcomm')
+		    if [[ ${#args[*]} -lt 2 || -z "${args[1]}" ]]; then
+			echo "$PROGNAME: incorrect format of the config line number $linenum:" >&2
+			echo "$line" >&2
+			clean_exit 2
+		    fi
+		    get_command STOPCOMMS_$((STOPCOMMS_N++)) "${args[@]}"
+		    ;;
+
+		'startcomm')
+		    if [[ ${#args[*]} -lt 2 || -z "${args[1]}" ]]; then
+			echo "$PROGNAME: incorrect format of the config line number $linenum:" >&2
+			echo "$line" >&2
+			clean_exit 2
+		    fi
+		    get_command STARTCOMMS_$((STARTCOMMS_N++)) "${args[@]}"
+		    ;;
+		
+		*)
+		    echo "$PROGNAME: incorrect format of the config line number $linenum:" >&2
+		    echo "$line" >&2
+		    clean_exit 2
+		    ;;
+	    esac
+	fi
+
+    done <<EOF_SSDBACKUP_CONF_821
+$(echo "$cfg_cont")
+EOF_SSDBACKUP_CONF_821
+
+    IFS="$ifs"
+
+    return 0
+
+}
+
+
+# check_config()
+#   check that the configuration is correct, i.e. that no stopstart
+#   directives of types sysv are defined (see array SSTYPE) if NOSYSV
+#   is non-empty and that the service binary exists if NOSYSV is empty,
+#   check that no stopstart directives of types systemd are defined
+#   (see array SSTYPE) if NOSYSTEMD is non-empty and that the systemctl
+#   binary exists if NOSYSTEMD is empty, should be run after read_config_file
+# return: exit - sysv/systemd specified when disabled or their binaries
+#                not found
+#         0 - ok or clean exit in progress
+check_config() {
+
+    [[ "$CE_RUNNING" = 0 ]] && return 0
+
+    local i type nosystemd_err=1 nosysv_err=1
+
+    # check that no sysv/systemd directives are specified if prohibited
+    for ((i=0; i<${#SSTYPE[@]}; i++)); do
+	type="${SSTYPE[i]}"
+
+	[[ -n "$NOSYSV" && "$type" = 'sysv' ]] && nosysv_err=0
+	[[ -n "$NOSYSTEMD" && "$type" = 'systemd' ]] && nosystemd_err=0
+    done
+    
+    if [[ "$nosysv_err" = 0 ]]; then
+	echo "$PROGNAME: nosysv directive specified in the config file, but" >&2
+	echo "$PNSPACES  at least one stopstart directive of type sysv exists" >&2
+	clean_exit 2
+    fi
+
+    if [[ "$nosystemd_err" = 0 ]]; then
+	echo "$PROGNAME: nosystemd directive specified in the config file, but" >&2
+	echo "$PNSPACES  at least one stopstart directive of type systemd exists" >&2
+	clean_exit 2
+    fi
+
+    return 0
+
+}
+
+
+# check_addon_tools()
+#   check if add-on tools that are necessary for proper operation are present
+#   in the system, the specific tools depend on given script arguments
+#   or configuration
+# return: exit - some of the tools are missing
+#         0 - ok
+check_addon_tools() {
+
+    [[ "$CE_RUNNING" = 0 ]] && return 0
+
+    local ec=0
+
+    # check that service binary exists if no sysv directive is specified
+    if [[ -z "$NOSYSV" ]]; then
+	if ! which service >/dev/null; then
+	    echo "$PROGNAME: 'service' binary not found and sysv not disabled" >&2
+	    echo "$PNSPACES  in the config file" >&2
+	    ec=2
+	fi
+    fi
+
+    # check that systemctl binary exists if no systemd directive is specified
+    if [[ -z "$NOSYSTEMD" ]]; then
+	if ! which systemctl >/dev/null; then
+	    echo "$PROGNAME: 'systemctl' binary not found and systemd not disabled" >&2
+	    echo "$PNSPACES  in the config file" >&2
+	    ec=2
+	fi
+    fi
+
+    # check that the pkill binary is present if some processed should be killed
+    if [[ "${#KILLPS[@]}" -gt 0 || "$ARG_U" = 'y' ]]; then
+	if ! which pkill >/dev/null; then
+	    echo "$PROGNAME: 'pkill' binary not found and some processes" >&2
+	    echo "$PNSPACES  should be killed as specified in the config file" >&2
+	    echo "$PNSPACES  or by the -u argument" >&2
+	    ec=2
+	fi	
+    fi
+    
+    # check that the pgrep binary is present if some processed should be killed
+    if [[ "${#KILLPS[@]}" -gt 0 ]]; then
+	if ! which pgrep >/dev/null; then
+	    echo "$PROGNAME: 'pgrep' binary not found and some processes" >&2
+	    echo "$PNSPACES  should be killed as specified in the config file" >&2
+	    ec=2
+	fi	
+    fi
+
+    [[ "$ec" -ne 0 ]] && clean_exit "$ec"
+    return 0
+    
+}
+
+
+# get_timestamp
+#   print timestamp in the RFC-3339 format
+# return:
+#   0 - ok
+get_timestamp() {
+
+    if [[ "$ARG_V" = 'y' ]]; then
+	echo -n "$PROGNAME: "
+	date --rfc-3339=seconds
+    fi
+
+    return 0
+    
+}
+
+
+# check_status_file()
+#   check that the ssd-backup status file is available in the workdir
+# return: exit - the file isn't available, readable or writable
+#         0 - ok
+check_status_file() {
+
+    if [[ "$ARG_MODE" = 'stop' ]]; then
+
+	if [[ -f "$WORKDIR/status" ]]; then
+	    echo "$PROGNAME: the file '$WORKDIR/status' already exists which" >&2
+	    echo "$PNSPACES  indicates that this command in the stop mode has already" >&2
+	    echo "$PNSPACES  been invoked, use this command in the start mode to revert" >&2
+	    echo "$PNSPACES  to the original state and rather check if all the services" >&2
+	    echo "$PNSPACES  are running (this might not be the case if you ran this command" >&2
+	    echo "$PNSPACES  in the stop mode some time ago)" >&2
+
+	    clean_exit 2
+	fi
+
+    elif [[ "$ARG_MODE" = 'start' ]]; then
+
+	if [[ ! -f "$WORKDIR/status" || ! -r "$WORKDIR/status" ]]; then
+	    echo "$PROGNAME: the file '$WORKDIR/status' isn't available or readable," >&2
+	    echo "$PNSPACES  this indicates that this command in the stop mode hasn't finished" >&2
+	    echo "$PNSPACES  successfully prior to the start mode and you therefore cannot" >&2
+	    echo "$PNSPACES  use the start mode now, you must check and start the services" >&2
+	    echo "$PNSPACES  manually by using the ps, service and systemctl commands" >&2
+	    echo "$PNSPACES  if you want to do so or use this command with the -f switch" >&2
+
+	    clean_exit 2
+	fi
+
+    fi
+
+    return 0
+    
+}
+
+
+# stop()
+#   stop the sysv/systemd services and kill the processes specified
+#   in the config file, also restrict user logins and kill all user processes
+#   if the -u option was given
+# return: 0 - ok (the return value of the sysv scripts doesn't always indicate
+#                 the success or failure)
+#         1 - cannot restrict user logins
+#         2 - cannot find out the status of sysv services
+#         3 - error when stopping some service(s) or killing some process(es),
+#             all stopping tasks are always run irrespective of potential
+#             errors in some of them
+stop() {
+
+    local i n
+    local service signal
+    local ec=0 statall_ec io_ec
+    local stat active pidfile psname pf_pid pf_name
+
+    # restrict user logins if -u was given
+    rm -f "$WORKDIR/nologin"
+    if [[ $? -ne 0 ]]; then
+	echo "$PROGNAME: cannot delete the file '$WORKDIR/nologin' and thus remember" >&2
+	echo "$PNSPACES  user logins, delete it manually" >&2
+	return 1
+    fi
+
+    if [[ -f '/var/run/nologin' ]]; then
+	touch "$WORKDIR/nologin"
+	if [[ $? -ne 0 ]]; then
+	    echo "$PROGNAME: cannot create the file '$WORKDIR/nologin' and thus remember" >&2
+	    echo "$PNSPACES  user logins status" >&2
+	fi
+    fi
+
+    if [[ "$ARG_U" = 'y' ]]; then
+	if [[ ! -f '/var/run/nologin' ]]; then
+	    [[ "$ARG_V" = 'y' ]] \
+		&& echo "$PROGNAME: restricting user logins by creating the file '/var/run/nologin'"
+
+	    touch '/var/run/nologin'
+	    if [[ $? -ne 0 ]]; then
+		echo "$PROGNAME: cannot create the file '/var/run/nologin' and thus restrict" >&2
+		echo "$PNSPACES  user logins, aborting..." >&2
+		return 1		
+	    fi
+	else
+	    if [[ "$ARG_V" = 'y' ]]; then
+		echo "$PROGNAME: user logins already restricted, the file '/var/run/nologin'"
+		echo "$PNSPACES  exists"
+	    fi
+	fi
+    fi
+
+    # create the status file for all available system sysv services
+    rm -f "$WORKDIR/service.status-all"
+    if [[ $? -ne 0 ]]; then
+	echo "$PROGNAME: cannot delete the old file '$WORKDIR/service.status-all'" >&2
+	echo "$PNSPACES  and thus find out the status of sysv services, aborting..." >&2
+	return 2
+    fi
+
+    service --status-all >"$WORKDIR/service.status-all" 2>&1
+    statall_ec="$?"
+    grep -Ev '^[[:blank:]]*\[[[:blank:]]*[?+-][[:blank:]]*\][[:blank:]]+[^[:blank:]]' "$WORKDIR/service.status-all" >&2
+    
+    if [[ "$statall_ec" -ne 0 ]]; then
+	echo "$PROGNAME: cannot create the file '$WORKDIR/service.status-all'" >&2
+	echo "$PNSPACES  and thus find out the status of sysv services, aborting..." >&2
+	return 2
+    fi
+
+    # delete the status file if -f argument was given
+    if [[ "$ARG_F" = 'y' ]]; then
+	rm -f "$WORKDIR/status"
+	if [[ $? -ne 0 ]]; then
+	    echo "$PROGNAME: cannot delete the file '$WORKDIR/status' and thus purge" >&2
+	    echo "$PNSPACES  stale status of services, delete it manually" >&2
+	fi
+    fi
+
+    # stop the sysv/systemd services if they exist
+    n="${#SSINIT[@]}"
+    for ((i=0; i<n; i++)); do
+	
+	service="${SSINIT[i]}"
+	type="${SSTYPE[i]}"
+
+	case "$type" in
+	    'sysv')
+		
+		if [[ ! -x "/etc/init.d/$service" ]]; then
+		    echo "$PROGNAME: the sysv service '$service' doesn't exist" >&2
+		    
+		    ec=3
+		    continue
+		fi
+
+		stat="$(sed -rn "s#^[[:blank:]]*\[[[:blank:]]*([?+-])[[:blank:]]*\][[:blank:]]+$service([[:blank:]]*)?\$#\1#p" "$WORKDIR/service.status-all")"
+
+		if [[ "$stat" = '+' || "$stat"  = '?' || "$ARG_F" = 'y' ]]; then
+		
+		    if [[ "$stat" = '?' && -n "${SSOPTS[i]}" ]]; then
+			pidfile="$(echo "${SSOPTS[i]}" | tr ',' '\n' | sed -rn 's#^pidfile=(.*)$#\1#p')"
+			psname="$(echo "${SSOPTS[i]}" | tr ',' '\n' | sed -rn 's#^psname=(.*)$#\1#p')"
+			
+			if [[ -n "$pidfile" ]]; then
+			    if [[ -f "$pidfile" && -r "$pidfile" ]]; then
+				pf_pid="$(cat "$pidfile")"
+				if [[ -n "$pf_pid" ]]; then
+				    pf_name="$(ps -eo pid,comm= | sed -rn "s#^[[:blank:]]*$pf_pid[[:blank:]]+(.*)\$#\1#p")"
+				    if [[ -n "$psname" ]]; then
+					if [[ "$pf_name" = "$psname" ]]; then
+					    stat='+'
+					else
+					    stat='-'
+					fi
+				    else
+					if [[ -n "$pf_name" ]]; then
+					    stat='+'
+					else
+					    stat='-'
+					fi
+				    fi
+				else
+				    stat='-'
+				fi
+			    else
+				stat='-'
+			    fi
+			else
+			    if [[ -n "$psname" ]]; then
+				ps_name="$(ps -eo comm= | sed -rn "s#^($psname)\$#\1#p")"
+				if [[ -n "$ps_name" ]]; then
+				    stat='+'
+				else
+				    stat='-'
+				fi
+			    fi
+			fi
+		    fi
+
+		    [[ "$stat" = '-' ]] && continue
+
+		    [[ "$ARG_V" = 'y' && "$stat" = '?' ]] \
+			&& echo "$PROGNAME: cannot find out if sysv service '$service' is running"
+
+		    [[ "$ARG_V" = 'y' ]] \
+			&& echo "$PROGNAME: stopping the '$service' sysv service"
+
+		    echo "$stat sysv $service" >>"$WORKDIR/status"
+		    if [[ $? -ne 0 ]]; then
+			echo "$PROGNAME: cannot store initial status of sysv service '$service'" >&2
+			echo "$PNSPACES  into the file '$WORKDIR/status'" >&2
+		    fi
+
+		    service "$service" stop >/dev/null
+		    if [[ $? -ne 0 ]]; then
+			echo "$PROGNAME: error during the sysv service '$service' shutdown" >&2
+			ec=3
+			continue
+		    fi
+
+		fi
+		;;
+
+	    'systemd')
+
+		systemctl -t service list-unit-files --all --no-legend | awk '{print($1);}' | grep -Eq "^$service\$"		
+		if [[ $? -ne 0 ]]; then
+		    echo "$PROGNAME: the systemd service '$service' doesn't exist" >&2
+		    ec=3
+		    continue
+		fi
+
+		systemctl is-active "$service" >/dev/null
+		active=$?
+		if [[ "$active" -eq 0 || "$ARG_F" = 'y' ]]; then
+
+		    [[ "$ARG_V" = 'y' ]] \
+			&& echo "$PROGNAME: stopping the '$service' systemd service"
+
+		    if [[ "$active" -eq 0 ]]; then
+			echo "+ systemd $service" >>"$WORKDIR/status"
+			io_ec=$?
+		    else
+			echo "- systemd $service" >>"$WORKDIR/status"
+			io_ec=$?
+		    fi
+			
+		    if [[ "$io_ec" -ne 0 ]]; then
+			echo "$PROGNAME: cannot store initial status of systemd service '$service'" >&2
+			echo "$PNSPACES  into the file '$WORKDIR/status'" >&2
+		    fi
+
+		    systemctl stop "$service" >/dev/null
+		    if [[ $? -ne 0 ]]; then
+			echo "$PROGNAME: error during the systemd service '$service' shutdown" >&2
+			ec=3
+			continue
+		    fi
+
+		fi
+		;;
+	esac
+
+    done
+
+    # send the processes to kill the SIGTERM signal, wait 3 seconds
+    # and send them the SIGKILL signal to ensure they get stopped
+    for signal in SIGTERM SIGKILL; do
+
+	n="${#KILLPS[@]}"
+	for ((i=0; i<n; i++)); do
+
+	    if [[ "$ARG_V" = 'y' ]]; then
+		echo "$PROGNAME: sending the processes whose name matches the '${KILLPS[i]}'"
+		echo "$PNSPACES  extended regular expression the $signal signal"
+	    fi
+
+	    pgrep "${KILLPS[i]}" >/dev/null
+	    [[ $? -ne 0 ]] && continue
+	    
+	    pkill "-$signal" "${KILLPS[i]}"
+	    if [[ $? -ne 0 ]]; then
+		echo "$PROGNAME: error when killing the '${KILLPS[i]}' processes" >&2
+		ec=3
+		continue
+	    fi
+
+	done
+
+	if [[ "$ARG_U" = 'y' ]]; then
+	    if [[ "$ARG_V" = 'y' ]]; then
+		echo "$PROGNAME: sending all user processes the $signal signal,"
+		echo "$PNSPACES  i.e. to all processes whose real username isn't one of:"
+		echo "$PNSPACES  ${SURVRUSERS//|/,}"
+	    fi
+
+	    KILLRUSERS="$(ps -eo ruser= | grep -Ev "^$SURVRUSERS\$" | sort | uniq | tr '\n' ,)"
+	    KILLRUSERS="${KILLRUSERS%,}"
+	    if [[ -n "$KILLRUSERS" ]]; then
+		pkill -"$signal" -U "$KILLRUSERS"
+		if [[ $? -ne 0 ]]; then
+		    echo "$PROGNAME: error when killing the processes not invoked by '$SURVRUSERS'" >&2
+		    ec=3
+		fi		
+	    fi
+	fi
+
+	if [[ "$signal" = "SIGTERM" && $n -ne 0 ]]; then
+	    [[ "$ARG_V" = 'y' ]] && echo "$PROGNAME: waiting 3 seconds"
+	    sleep 3
+	fi
+
+    done
+
+    # invoke all commands for the stop mode
+    for ((i=0; i<STOPCOMMS_N; i++)); do
+	eval '"${STOPCOMMS_'$i'[@]}"'
+    done
+
+    # delete the status file for all available system sysv services
+    rm -f "$WORKDIR/service.status-all"
+    if [[ $? -ne 0 ]]; then
+	echo "$PROGNAME: cannot delete the temporary file '$WORKDIR/service.status-all'" >&2
+    fi
+
+    return "$ec"
+    
+}
+
+
+# start()
+#   start the sysv/systemd scripts specified in the config file, also permit
+#   user logins if the -u option was given
+# return: 0 - ok (the return value of the sysv scripts doesn't always indicate
+#                 the success or failure)
+#         1 - cannot permit user logins or forget user logins status
+#         2 - error when starting some service(s), all starting tasks are
+#             always run irrespective of potential errors in some of them
+start() {
+
+    local i
+    local service
+    local ec=0
+    local stat
+
+    # invoke all commands for the start mode
+    for ((i=0; i<STARTCOMMS_N; i++)); do
+	eval '"${STARTCOMMS_'$i'[@]}"'
+    done
+
+    # start the sysv/systemd services if they exist
+    if [[ -f "$WORKDIR/status" || "$ARG_F" = 'y' ]]; then
+
+	i="${#SSINIT[@]}"
+	for ((i--; i>=0; i--)); do
+
+	    service="${SSINIT[i]}"
+	    type="${SSTYPE[i]}"
+
+	    if [[ "$ARG_F" = 'n' ]]; then
+		stat="$(sed -rn "s#^(.)[[:blank:]]+[^[:blank:]]+[[:blank:]]+$service\$#\1#p" "$WORKDIR/status")"
+	    else
+		stat='+'
+	    fi
+
+	    case "${SSTYPE[i]}" in
+		'sysv')
+		    
+		    if [[ ! -x "/etc/init.d/$service" ]]; then
+			echo "$PROGNAME: the sysv service '$service' doesn't exist" >&2
+			ec=2
+			continue
+		    fi
+
+		    if [[ "$stat" = '+' || "$stat" = '?' ]]; then
+
+			if [[ "$ARG_V" = 'y' && "$stat" = '?' ]]; then
+			    echo "$PROGNAME: cannot find out if sysv service '$service'"
+			    echo "$PNSPACES  was running during the stop phase"
+			fi
+
+			[[ "$ARG_V" = 'y' ]] \
+			    && echo "$PROGNAME: starting the '$service' sysv service"
+
+			service "$service" start >/dev/null
+			if [[ $? -ne 0 ]]; then
+			    echo "$PROGNAME: error during the sysv service '$service' startup" >&2
+			    ec=2
+			    continue
+			fi
+
+		    fi
+		    ;;
+
+		'systemd')
+
+		    systemctl -t service list-unit-files --all --no-legend | awk '{print($1);}' | grep -Eq "^$service\$"		
+		    if [[ $? -ne 0 ]]; then
+			echo "$PROGNAME: the systemd service '$service' doesn't exist" >&2
+			ec=2
+			continue
+		    fi
+
+		    if [[ "$stat" = '+' || "$stat" = '?' ]]; then
+			
+			if [[ "$ARG_V" = 'y' && "$stat" = '?' ]]; then
+			    echo "$PROGNAME: cannot find out if systemd service '$service'"
+			    echo "$PNSPACES  was running during the stop phase"
+			fi
+
+			[[ "$ARG_V" = 'y' ]] \
+			    && echo "$PROGNAME: starting the '$service' systemd service"
+
+			systemctl start "$service" >/dev/null
+			if [[ $? -ne 0 ]]; then
+			    echo "$PROGNAME: error during the systemd service '$service' startup" >&2
+			    ec=2
+			    continue
+			fi
+
+		    fi
+		    ;;
+
+	    esac
+
+	done
+
+    else
+
+	echo "$PROGNAME: the file '$WORKDIR/status' doesn't exist which" >&2
+	echo "$PNSPACES  indicates that this command in the stop mode hasn't been invoked" >&2
+	echo "$PNSPACES  prior to the start or clean mode, no services are going to be" >&2
+	echo "$PNSPACES  started" >&2
+	
+    fi
+    
+    # delete the status file
+    rm -f "$WORKDIR/status"
+    if [[ $? -ne 0 ]]; then
+	echo "$PROGNAME: cannot remove the file '$WORKDIR/status'," >&2
+	echo "$PNSPACES  check and remove it manually!!! this is important" >&2
+	echo "$PNSPACES  because the existence of this file indicates the state" >&2
+	echo "$PNSPACES  of the $PROGNAME cycle, i.e. whether the stop" >&2
+	echo "$PNSPACES  $PROGNAME action has been executed" >&2
+	return 1
+    fi
+
+    # permit user logins if -u was given
+    if [[ "$ARG_U" = 'y' ]]; then
+	if [[ ! -f "$WORKDIR/nologin" ]]; then
+	    if [[ -f '/var/run/nologin' ]]; then
+		[[ "$ARG_V" = 'y' ]] \
+		    && echo "$PROGNAME: permitting user logins by deleting the file '/var/run/nologin'"
+		rm -f '/var/run/nologin'
+		if [[ $? -ne 0 ]]; then
+		    echo "$PROGNAME: cannot delete the file '/var/run/nologin' and thus permit" >&2
+		    echo "$PNSPACES  user logins, delete it manually" >&2
+		    ec=1
+		fi
+	    else
+		if [[ "$ARG_V" = 'y' ]]; then
+		    echo "$PROGNAME: user logins already permitted, the file '/var/run/nologin'"
+		    echo "$PNSPACES  doesn't exist"
+		fi
+	    fi
+	fi
+    fi
+
+    rm -f "$WORKDIR/nologin"
+    if [[ $? -ne 0 ]]; then
+	echo "$PROGNAME: cannot delete the file '$WORKDIR/nologin' and thus" >&2
+	echo "$PNSPACES  forget user logins status, delete it manually" >&2
+	ec=1
+    fi
+
+    return "$ec"
+    
+}
+
+
+###### MAIN ###################################################################
+
+
+### check if all the external tools are available on the system
+check_tools id true cat sed grep date rm touch
+
+
+### parse and check arguments, run initialization
+
+parse_args "$@"
+
+[[ "$ARG_MODE" = 'help' ]] && usage
+
+# check if the script is called by root
+check_root_id
+
+# check that the working directory is all right
+check_work_dir
+
+# read and check the configuration file
+CONFFILE="$CONFFILE_DEFAULT"
+[[ "$ARG_C" = 'y' ]] && CONFFILE="$ARG_C_VAL"
+read_config_file "$CONFFILE"
+check_config
+
+# check add-on tools presence
+check_addon_tools
+
+
+### run the stop or start mode
+EC=0
+
+get_timestamp
+add_exit_cmd 'get_timestamp'
+
+[[ "$ARG_F" = 'n' ]] && check_status_file
+
+if [[ "$ARG_MODE" = 'stop' ]]; then
+    stop
+    EC="$?"
+elif [[ "$ARG_MODE" = 'start' || "$ARG_MODE" = 'clean' ]]; then
+    start
+    EC="$?"
+fi
+
+
+### exit
+clean_exit "$EC"
