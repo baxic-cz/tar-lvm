@@ -18,7 +18,7 @@ PROGNAME='tar-lvm-one'
 PNSPACES='           '
 
 # set versions
-SCRIPT_VERSION='00.21'
+SCRIPT_VERSION='00.22'
 SUITE_VERSION='00.80'
 
 # set configuration directory and files
@@ -1479,7 +1479,7 @@ pre() {
     if [[ $? -ne 0 ]]; then
 	echo "$PROGNAME: ssd-backup failed during the stop phase," >&"$errfd"
 	echo "$PNSPACES  not all required processes stopped" >&"$errfd"
-	fail='STOP'
+	#fail='STOP'
     fi
 
     # create lvm snaphots and remount read/write non-lvm filesystems read-only
@@ -1497,7 +1497,7 @@ pre() {
 	if [[ $? -ne 0 ]]; then
 	    echo "$PROGNAME: ssd-backup failed during the start phase," >&"$errfd"
 	    echo "$PNSPACES  not all required processes started" >&"$errfd"
-	    fail='START'
+	    #fail='START'
 	fi
     fi
 
@@ -1577,7 +1577,7 @@ post() {
 	if [[ $? -ne 0 ]]; then
 	    echo "$PROGNAME: ssd-backup failed during the start phase," >&"$errfd"
 	    echo "$PNSPACES  not all required processes started" >&"$errfd"
-	    fail='START'
+	    #fail='START'
 	fi
     fi
 

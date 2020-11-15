@@ -18,7 +18,7 @@ PROGNAME='ssd-backup'
 PNSPACES='          '
 
 # set versions
-SCRIPT_VERSION='00.21'
+SCRIPT_VERSION='00.22'
 SUITE_VERSION='00.80'
 
 # set configuration directory and default configuration file
@@ -35,6 +35,13 @@ unset KILLPS
 SURVRUSERS=root
 STOPCOMMS_N=0
 STARTCOMMS_N=0
+
+# exit commands array and clean exit running flag
+unset EXIT_CMDS
+CE_RUNNING=1
+
+# script result as a string, i.e. its exit status printed at the end
+RESULT='FAILURE'
 
 
 # check_tools() tool1 ... toolN
@@ -313,6 +320,18 @@ clean_exit() {
     [[ "$ec_orig" = 0 && "$ec" != 0 ]] && ec_orig="$ec"
     exit "$ec_orig"
 
+}
+
+
+# print_result()
+#   print the final status of the script, i.e. its result
+# return: 0 - ok
+print_result() {
+
+    echo
+    echo "$PROGNAME: result => $RESULT (not checked by tar-lvm suite)"
+    echo
+    
 }
 
 
@@ -883,7 +902,7 @@ stop() {
 
 	    'systemd')
 
-		systemctl -t service list-unit-files --all --no-legend | awk '{print($1);}' | grep -Eq "^$service\$"		
+		systemctl -t service list-units --all --no-legend | awk '{print($1);}' | grep -Eq "^$service\$"		
 		if [[ $? -ne 0 ]]; then
 		    echo "$PROGNAME: the systemd service '$service' doesn't exist" >&2
 		    ec=3
@@ -1054,7 +1073,7 @@ start() {
 
 		'systemd')
 
-		    systemctl -t service list-unit-files --all --no-legend | awk '{print($1);}' | grep -Eq "^$service\$"		
+		    systemctl -t service list-units --all --no-legend | awk '{print($1);}' | grep -Eq "^$service\$"		
 		    if [[ $? -ne 0 ]]; then
 			echo "$PROGNAME: the systemd service '$service' doesn't exist" >&2
 			ec=2
@@ -1171,6 +1190,7 @@ check_addon_tools
 EC=0
 
 get_timestamp
+add_exit_cmd 'print_result'
 add_exit_cmd 'get_timestamp'
 
 [[ "$ARG_F" = 'n' ]] && check_status_file
@@ -1185,4 +1205,10 @@ fi
 
 
 ### exit
+if [[ "$EC" -eq 0 ]]; then
+    RESULT='OK'
+else
+    EC=0
+fi
+   
 clean_exit "$EC"

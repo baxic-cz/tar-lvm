@@ -18,7 +18,7 @@ PROGNAME='tar-lvm-all'
 PNSPACES='           '
 
 # set versions
-SCRIPT_VERSION='00.21'
+SCRIPT_VERSION='00.22'
 SUITE_VERSION='00.80'
 
 # set configuration directories and files
@@ -1114,6 +1114,8 @@ all() {
     local ec=0 result='OK'
     local i vmstr vmhost ispm=0 isvm=0 parvmhostnum=1 parvmhosts=''
     local vh_fail vh fail fail_now
+
+    local stmsg
     
     # unset tar-lvm-one config variables
     unset ALLHOST
@@ -1314,7 +1316,9 @@ all() {
 	while true; do
 	    sleep "$hostperiod"
 	    
-	    [[ "$ARG_V" = y ]] && echo "VMs|hosts> $parvmhosts (max: $parvmhostnum)"
+	    stmsg="VMs|hosts> $parvmhosts (max: $parvmhostnum)"
+	    [[ "$ARG_V" = y ]] && echo "$stmsg"
+	    echo "$PROGNAME: $stmsg" > /dev/console
 
 	    for vh_fail in $parvmhosts; do
 
@@ -1338,7 +1342,7 @@ all() {
 		if [[ "$fail_now" != 0 ]]; then
 		    ssh -x -A "root@$vh_h" "bash -c 'echo -n TAR-LVM-ONE-COMMAND-RUNS: && ps -e -o comm= | grep ^tar-lvm-one\$ || true'" >"$WORKDIR/tmpfs/tar-lvm-one.runs" 2>"$WORKDIR/tmpfs/stderr.tmp"
 		    if [[ $? -ne 0 ]]; then
-			grep -Ev '^stdin: is not a tty$' "$WORKDIR/tmpfs/stderr.tmp" >&2
+n			grep -Ev '^stdin: is not a tty$' "$WORKDIR/tmpfs/stderr.tmp" >&2
 			echo "$PROGNAME: cannot find out if tar-lvm-one still runs" >&2
 			echo "$PNSPACES  on host '$vh_v'" >&2
 			fail_now=0
