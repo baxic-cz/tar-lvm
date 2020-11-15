@@ -1,3 +1,7 @@
+  tar-lvm-all 00.22 - output to system console added
+  tar-lvm-one 00.22 - ssd-backup exit code not checked
+  ssd-backup 00.22 - systemd services with argumnets supported
+
   tar-lvm-all 00.21 - ssh agent support added
   tar-lvm-one 00.21 - ssh agent support added
   ssd-backup 00.21 - bug fix - Additional characters prevented the script
