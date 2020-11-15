@@ -18,7 +18,7 @@ PROGNAME='install.sh'
 PNSPACES='          '
 
 # set versions
-SCRIPT_VERSION='00.20'
+SCRIPT_VERSION='00.22'
 SUITE_VERSION='00.80'
 
 
